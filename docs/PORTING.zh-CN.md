@@ -153,13 +153,22 @@ Linux 参考实现使用 OpenSSL 与系统 CA 库。明文 HTTP 仅存在于
 存在显示设备时实现 `mybot_lcd_ops_t`。渲染由应用 control owner 调用，SDK 不会并发调用。
 内容为借用。将 ops 表加入平台描述符。
 
-`mybot_lcd_content_t.indicators` 是用于非互斥叠加提示的位图。在
+`mybot_lcd_content_t.indicators` 是用于叠加提示和一次性表情请求的位图。在
 `MYBOT_LCD_SCREEN_IN_CONVERSATION` 中，`MYBOT_LCD_INDICATOR_VP_REGISTERED` 表示当前会话的声纹
 已由服务器注册成功，平台应将其渲染为会话界面的附加指示器。平台应忽略无法识别的位，不能
 根据该指示器自行推断生命周期状态。该位清零时，平台可以自行显示“注册中/未注册”标记，
 但这只是显示状态，不能改变 SDK 生命周期。`MYBOT_LCD_INDICATOR_LISTENING`、
 `MYBOT_LCD_INDICATOR_THINKING` 和 `MYBOT_LCD_INDICATOR_SPEAKING` 分别表示服务端正在监听、
 思考或播报，后三个位互斥。
+
+设备命令通过单次 render 中的 `MYBOT_LCD_INDICATOR_HAPPY`、`MYBOT_LCD_INDICATOR_SAD`、
+`MYBOT_LCD_INDICATOR_ANGRY` 或 `MYBOT_LCD_INDICATOR_SURPRISED` 请求表情，同时保留已有声纹
+和服务状态位。每次含有表情位的调用都启动一个新表情，即使与上次相同。普通刷新没有表情位，
+只更新叠加提示，不重启或取消正在显示的表情。SDK 不持久保存表情命令，也不发送清零刷新。
+平台负责表情预设和动画时序；新表情覆盖未完成的旧表情，离开
+`MYBOT_LCD_SCREEN_IN_CONVERSATION` 时结束表情。异步渲染需在回调返回前复制内容，
+`destroy()` 释放上下文前必须等待相关工作退出。接口契约见
+[mybot_lcd.h](../include/mybot/platform/mybot_lcd.h)。
 
 ### 唤醒词（可选）
 
@@ -350,6 +359,36 @@ RTM UID 必须非空、长度小于 64 字节，并且只能包含 Agora 接受�
 匹配 `"object":"message.sal_status"` 与 `"status":"VP_REGISTER_SUCCESS"` 的消息。SDK 在
 会话开始和结束时重置这些状态，并通过 `MYBOT_LCD_INDICATOR_VP_REGISTERED` 暴露声纹成功指示，
 通过三个服务端状态位暴露对话阶段；P2P RTM 回调继续保留用于点对点消息。
+
+### MCP 设备命令
+
+MCP 工具调用及云端鉴权由服务端负责。SDK 直接接收 RTM 中已定义的 DeviceCommand v1 JSON
+对象，不猜测或解包未定义的云端外层。P2P 和订阅频道消息共用解析器，命令在 `control_mpq` 执行。
+消息不超过 1024 字节；`message_id`、`command_id` 和 `conversation_id` 均须非空且不超过
+127 字节。未知或重复字段、未支持命令、错误参数类型均被拒绝。SDK 不新增 MCP 网络客户端、
+命令 ACK 或执行重试。
+
+对象必需包含 `type: "device_command"`、`schema: "botstation.device-command"`、`version: 1`、
+上述三个 ID、UTC `issued_at` 与 `expires_at`，以及含 `type`、`name`、`params` 的 `command`
+对象。UTC 时间格式为 `YYYY-MM-DDTHH:MM:SSZ` 或 `YYYY-MM-DDTHH:MM:SS.sssZ`。
+
+| Command type | Name | Params |
+| --- | --- | --- |
+| `action` | `audio.set_volume` | 整数 `level: 0..100` |
+| `action` | `audio.adjust_volume` | 整数 `delta: -100..100`；结果限制到 0..100 |
+| `action` | `audio.set_mute` | 布尔值 `muted` |
+| `scene` | `emotion.happy`、`emotion.sad`、`emotion.angry`、`emotion.surprised` | 仅接受空对象 `{}` |
+
+音量命令复用按键调音路径：有效的硬件音量实现优先，否则由 SDK 应用软件增益。静音同时作用
+于 RTC 播放和本地提示音，保留逻辑音量，不停止麦克风采集及上行。云端 AEC 参考使用播放
+实际接受的 PCM，静音时为零；提示音仍不进入参考。
+
+执行时，SDK 将实际 RTM 发送方、频道消息的 channel 及正文 conversation ID 与当前会话
+完整匹配。目标 AOSL HAL 必须通过 `aosl_time_ms()` 提供可靠的 UTC 毫秒时间。SDK 在排队后
+的实际执行时，使用该接口的实际返回值验证 `issued_at <= now < expires_at`，无法独立识别
+开机计时或未同步的时钟。产品必须在接收命令前完成 UTC 同步；SDK 不新增时间同步任务或
+平台时钟接口。每个会话用最多 16 个 command ID 缓存防止重复执行，
+过期条目回收，会话边界清空缓存。
 
 ## 第 7 步：交叉编译
 

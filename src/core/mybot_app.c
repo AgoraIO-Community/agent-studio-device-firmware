@@ -4,6 +4,7 @@
 #include <mybot/platform/mybot_platform.h>
 
 #include "mybot_agora_rtc.h"
+#include "mybot_device_command.h"
 #include "mybot_device_lifecycle.h"
 #include "mybot_key_internal.h"
 #include "mybot_kv_store_internal.h"
@@ -30,12 +31,18 @@
 #define CONTROL_MPQ_STACK_SIZE 16384
 #define VOLUME_KEY_STEP 10
 #define RTM_MESSAGE_MAX_BYTES 1024U
+#define COMMAND_HISTORY_SIZE 16U
 
 static const char k_rtm_vp_status_object[] = "message.sal_status";
 static const char k_rtm_vp_status_success[] = "VP_REGISTER_SUCCESS";
 static const char k_rtm_state_listening[] = "state.listening";
 static const char k_rtm_state_thinking[] = "state.thinking";
 static const char k_rtm_state_speaking[] = "state.speaking";
+
+typedef struct {
+    char id[MYBOT_DEVICE_COMMAND_ID_CAPACITY];
+    uint64_t expires_at_ms;
+} command_history_entry_t;
 
 typedef struct {
     aosl_atomic_t running;
@@ -50,8 +57,9 @@ typedef struct {
     mybot_media_pipeline_t media;
 #if MYBOT_ENABLE_VIDEO
     mybot_video_t video;
-    aosl_atomic_t video_generation;
 #endif
+    aosl_atomic_t conversation_generation;
+    command_history_entry_t command_history[COMMAND_HISTORY_SIZE];
     mybot_device_lifecycle_t lifecycle;
     /* Snapshots used to reject stale RTM events from a previous conversation. */
     char rtc_channel[128];
@@ -137,24 +145,10 @@ static uint32_t rtm_uid_fingerprint(const char *rtm_uid, size_t len) {
     return fingerprint;
 }
 
-static bool rtm_data_get_lcd_indicator(const void *data, size_t len,
-                                       mybot_lcd_indicator_t *indicator, bool *active) {
-    if (!data || !indicator || !active || len == 0 || len > RTM_MESSAGE_MAX_BYTES ||
-        memchr(data, '\0', len) != NULL) {
-        return false;
-    }
-
-    char *message = (char *)aosl_hal_malloc(RTM_MESSAGE_MAX_BYTES + 1U);
-    if (!message) {
-        return false;
-    }
-    memcpy(message, data, len);
-    message[len] = '\0';
-
-    bool matched = false;
-    mybot_json_t *root = mybot_json_parse(message);
+static bool rtm_data_get_lcd_indicator(const mybot_json_t *root, mybot_lcd_indicator_t *indicator,
+                                       bool *active) {
     if (!root || root->type != MYBOT_JSON_OBJECT) {
-        goto done;
+        return false;
     }
 
     const char *object = mybot_json_get_string(json_get_exact_object_item(root, "object"));
@@ -163,8 +157,7 @@ static bool rtm_data_get_lcd_indicator(const void *data, size_t len,
         strcmp(status, k_rtm_vp_status_success) == 0) {
         *indicator = MYBOT_LCD_INDICATOR_VP_REGISTERED;
         *active = true;
-        matched = true;
-        goto done;
+        return true;
     }
 
     const char *event_type = mybot_json_get_string(json_get_exact_object_item(root, "event_type"));
@@ -172,7 +165,7 @@ static bool rtm_data_get_lcd_indicator(const void *data, size_t len,
     const mybot_json_t *value = payload ? json_get_exact_object_item(payload, "value") : NULL;
     if (!event_type || !value ||
         (value->type != MYBOT_JSON_TRUE && value->type != MYBOT_JSON_FALSE)) {
-        goto done;
+        return false;
     }
 
     if (strcmp(event_type, k_rtm_state_listening) == 0) {
@@ -182,16 +175,11 @@ static bool rtm_data_get_lcd_indicator(const void *data, size_t len,
     } else if (strcmp(event_type, k_rtm_state_speaking) == 0) {
         *indicator = MYBOT_LCD_INDICATOR_SPEAKING;
     } else {
-        goto done;
+        return false;
     }
 
     *active = value->type == MYBOT_JSON_TRUE;
-    matched = true;
-
-done:
-    mybot_json_delete(root);
-    aosl_hal_free(message);
-    return matched;
+    return true;
 }
 
 static void handle_lcd_indicator(const aosl_ts_t *queued_ts, aosl_refobj_t robj, uintptr_t argc,
@@ -242,6 +230,163 @@ static void queue_lcd_indicator(mybot_runtime_t *runtime, const char *channel, c
                        (uintptr_t)channel_hash, (uintptr_t)indicator, (uintptr_t)active) < 0) {
         AOSL_LOG_WRN("failed to queue LCD indicator event");
     }
+}
+
+typedef struct {
+    mybot_runtime_t *runtime;
+    uintptr_t generation;
+    char sender[MYBOT_RTM_UID_MAX_LEN];
+    char channel[128]; /* Empty for a private message. */
+    mybot_device_command_t command;
+} device_command_event_t;
+
+/* Retain accepted IDs until expiry; never evict a live ID and execute its duplicate. */
+static bool remember_command(mybot_runtime_t *runtime, const mybot_device_command_t *command,
+                             uint64_t now_ms) {
+    command_history_entry_t *available = NULL;
+    for (size_t i = 0; i < COMMAND_HISTORY_SIZE; ++i) {
+        command_history_entry_t *entry = &runtime->command_history[i];
+        if (entry->id[0] && strcmp(entry->id, command->command_id) == 0) {
+            AOSL_LOG_DBG("[RTM] duplicate device command ignored");
+            return false;
+        }
+        if (!available && (!entry->id[0] || entry->expires_at_ms <= now_ms)) {
+            available = entry;
+        }
+    }
+    if (!available) {
+        AOSL_LOG_WRN("[RTM] device command ignored: active ID history is full");
+        return false;
+    }
+    memcpy(available->id, command->command_id, strlen(command->command_id) + 1U);
+    available->expires_at_ms = command->expires_at_ms;
+    return true;
+}
+
+static void handle_device_command(const aosl_ts_t *ts, aosl_refobj_t ref, uintptr_t argc,
+                                  uintptr_t argv[]) {
+    (void)ts;
+    (void)ref;
+    if (argc != 1 || !argv[0]) {
+        return;
+    }
+    device_command_event_t *event = (device_command_event_t *)argv[0];
+    mybot_runtime_t *runtime = event->runtime;
+    const mybot_device_command_t *command = &event->command;
+    if (!runtime_is_running(runtime) ||
+        event->generation != (uintptr_t)aosl_atomic_read(&runtime->conversation_generation) ||
+        runtime_get_state(runtime) != MYBOT_STATE_IN_CONVERSATION ||
+        aosl_atomic_read(&runtime->lifecycle.stop_request) ||
+        strcmp(event->sender, runtime->rtc_agent_uid) != 0 ||
+        (event->channel[0] && strcmp(event->channel, runtime->rtc_channel) != 0) ||
+        strcmp(command->conversation_id, runtime->lifecycle.conversation_id) != 0) {
+        AOSL_LOG_DBG("[RTM] device command ignored: inactive or different conversation");
+        goto done;
+    }
+    /* The HAL must supply synchronized UTC, not uptime. Check at execution after queue delays. */
+    uint64_t now_ms = aosl_time_ms();
+    if (now_ms == 0 || now_ms < command->issued_at_ms || now_ms >= command->expires_at_ms) {
+        AOSL_LOG_WRN("[RTM] device command ignored: expired or UTC time is not ready");
+        goto done;
+    }
+    if (!remember_command(runtime, command, now_ms)) {
+        goto done;
+    }
+    int ret = 0;
+    switch (command->type) {
+    case MYBOT_DEVICE_COMMAND_SET_VOLUME:
+        ret = mybot_media_pipeline_set_volume(&runtime->media, command->params.volume);
+        break;
+    case MYBOT_DEVICE_COMMAND_ADJUST_VOLUME:
+        ret = mybot_media_pipeline_adjust_volume(&runtime->media, command->params.delta);
+        break;
+    case MYBOT_DEVICE_COMMAND_SET_MUTE:
+        mybot_media_pipeline_set_muted(&runtime->media, command->params.muted);
+        break;
+    case MYBOT_DEVICE_COMMAND_EMOTION:
+        ret = mybot_presenter_show_emotion(&runtime->presenter, command->params.emotion);
+        break;
+    }
+    if (ret < 0) {
+        AOSL_LOG_WRN("[RTM] device command execution failed (type=%d)", (int)command->type);
+    }
+done:
+    aosl_hal_free(event);
+}
+
+static void queue_device_command(mybot_runtime_t *runtime, const char *channel, const char *sender,
+                                 const mybot_json_t *root, uintptr_t generation) {
+    device_command_event_t *event = (device_command_event_t *)aosl_hal_malloc(sizeof(*event));
+    if (!event) {
+        AOSL_LOG_ERR("[RTM] failed to allocate device command");
+        return;
+    }
+    memset(event, 0, sizeof(*event));
+    if (!mybot_device_command_parse(root, &event->command)) {
+        AOSL_LOG_WRN("[RTM] invalid or unsupported DeviceCommand v1");
+        aosl_hal_free(event);
+        return;
+    }
+    event->runtime = runtime;
+    event->generation = generation;
+    memcpy(event->sender, sender, strlen(sender) + 1U);
+    if (channel) {
+        memcpy(event->channel, channel, strlen(channel) + 1U);
+    }
+    if (aosl_mpq_queue(runtime->control_mpq, AOSL_MPQ_INVALID, AOSL_REF_INVALID,
+                       "handle_device_command", handle_device_command, 1, (uintptr_t)event) < 0) {
+        AOSL_LOG_WRN("[RTM] failed to queue device command");
+        aosl_hal_free(event);
+    }
+}
+
+/* JSON nodes do not retain string lengths; reject an escaped embedded NUL before parsing. */
+static bool rtm_json_contains_nul(const char *message) {
+    for (const char *p = message; *p; ++p) {
+        if (*p == '\\') {
+            ++p;
+            if (!*p) {
+                break;
+            }
+            if (strncmp(p, "u0000", 5) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void process_application_rtm_data(mybot_runtime_t *runtime, const char *channel,
+                                         const char *sender, const void *data, size_t len) {
+    if (!data || len == 0 || len > RTM_MESSAGE_MAX_BYTES || memchr(data, '\0', len)) {
+        AOSL_LOG_DBG("[RTM] application JSON ignored: invalid payload length or embedded NUL");
+        return;
+    }
+    uintptr_t generation = (uintptr_t)aosl_atomic_read(&runtime->conversation_generation);
+    char *message = (char *)aosl_hal_malloc(len + 1U);
+    if (!message) {
+        AOSL_LOG_ERR("[RTM] failed to allocate application JSON");
+        return;
+    }
+    memcpy(message, data, len);
+    message[len] = '\0';
+    mybot_json_t *root = rtm_json_contains_nul(message) ? NULL : mybot_json_parse(message);
+    const char *type = mybot_json_get_string(json_get_exact_object_item(root, "type"));
+    const char *schema = mybot_json_get_string(json_get_exact_object_item(root, "schema"));
+    if ((type && strcmp(type, "device_command") == 0) ||
+        (schema && strcmp(schema, "botstation.device-command") == 0)) {
+        queue_device_command(runtime, channel, sender, root, generation);
+    } else {
+        mybot_lcd_indicator_t indicator;
+        bool active;
+        if (channel && rtm_data_get_lcd_indicator(root, &indicator, &active)) {
+            queue_lcd_indicator(runtime, channel, sender, indicator, active);
+        } else {
+            AOSL_LOG_DBG("[RTM] application data not handled: no matching message type");
+        }
+    }
+    mybot_json_delete(root);
+    aosl_hal_free(message);
 }
 
 static void handle_start_conversation(const aosl_ts_t *queued_ts, aosl_refobj_t robj,
@@ -306,7 +451,7 @@ static void handle_video_control(const aosl_ts_t *ts, aosl_refobj_t ref, uintptr
     }
     mybot_runtime_t *runtime = (mybot_runtime_t *)argv[0];
     if (!runtime_is_running(runtime) ||
-        argv[1] != (uintptr_t)aosl_atomic_read(&runtime->video_generation) ||
+        argv[1] != (uintptr_t)aosl_atomic_read(&runtime->conversation_generation) ||
         runtime_get_state(runtime) != MYBOT_STATE_IN_CONVERSATION || !runtime->rtc_channel[0] ||
         aosl_atomic_read(&runtime->lifecycle.stop_request) ||
         !aosl_atomic_read(&runtime->media.rtc_connected)) {
@@ -333,7 +478,7 @@ static void queue_video_control(mybot_runtime_t *runtime, video_control_event_t 
         return;
     }
     /* Copy scalars into the queue; only the control worker touches the encoder. */
-    uintptr_t generation = (uintptr_t)aosl_atomic_read(&runtime->video_generation);
+    uintptr_t generation = (uintptr_t)aosl_atomic_read(&runtime->conversation_generation);
     if (aosl_mpq_queue(runtime->control_mpq, AOSL_MPQ_INVALID, AOSL_REF_INVALID,
                        "handle_video_control", handle_video_control, 4, (uintptr_t)runtime,
                        generation, (uintptr_t)event, (uintptr_t)target_bps) < 0) {
@@ -381,7 +526,7 @@ static void rtc_on_rtm_event(const char *rtm_uid, mybot_rtm_event_type_t event_t
 
 static void rtc_on_rtm_data(const char *rtm_uid, const void *data, size_t len,
                             const char *custom_type, void *user_data) {
-    (void)data;
+    (void)custom_type;
     mybot_runtime_t *runtime = user_data;
     if (!runtime_is_running(runtime)) {
         AOSL_LOG_DBG("[RTM] application data ignored: runtime is not running");
@@ -395,8 +540,7 @@ static void rtc_on_rtm_data(const char *rtm_uid, const void *data, size_t len,
         AOSL_LOG_WRN("[RTM] application data ignored: invalid sender UID length (len=%zu)", len);
         return;
     }
-    AOSL_LOG_DBG("[RTM] P2P application data not handled (from=%s, type=%s, len=%zu)", rtm_uid,
-                 custom_type ? custom_type : "(null)", len);
+    process_application_rtm_data(runtime, NULL, rtm_uid, data, len);
 }
 
 static void rtc_on_rtm_subscribe_result(const char *channel, int error_code, void *user_data) {
@@ -414,12 +558,13 @@ static void rtc_on_rtm_subscribe_result(const char *channel, int error_code, voi
 
 static void rtc_on_rtm_subscribe_data(const char *channel, const char *rtm_uid, const void *data,
                                       size_t len, const char *custom_type, void *user_data) {
+    (void)custom_type;
     mybot_runtime_t *runtime = user_data;
     if (!runtime_is_running(runtime)) {
         AOSL_LOG_DBG("[RTM] application channel data ignored: runtime is not running");
         return;
     }
-    if (!channel || strnlen(channel, 128) >= 128) {
+    if (!channel || !channel[0] || strnlen(channel, 128) >= 128) {
         AOSL_LOG_WRN("[RTM] application channel data ignored: invalid channel (len=%zu)", len);
         return;
     }
@@ -432,16 +577,7 @@ static void rtc_on_rtm_subscribe_data(const char *channel, const char *rtm_uid, 
                      len);
         return;
     }
-    mybot_lcd_indicator_t indicator;
-    bool active;
-    if (rtm_data_get_lcd_indicator(data, len, &indicator, &active)) {
-        queue_lcd_indicator(runtime, channel, rtm_uid, indicator, active);
-        return;
-    }
-
-    AOSL_LOG_DBG("[RTM] application channel data not handled: no matching message type "
-                 "(channel=%s, from=%s, type=%s, len=%zu)",
-                 channel, rtm_uid, custom_type ? custom_type : "(null)", len);
+    process_application_rtm_data(runtime, channel, rtm_uid, data, len);
 }
 
 static void rtc_on_token_will_expire(void *user_data) {
@@ -508,6 +644,8 @@ static void dev_on_conversation_start(const mybot_device_conversation_t *params,
     }
     snprintf(runtime->rtc_channel, sizeof(runtime->rtc_channel), "%s", params->rtc_channel);
     snprintf(runtime->rtc_agent_uid, sizeof(runtime->rtc_agent_uid), "%s", params->rtc_agent_uid);
+    aosl_atomic_inc(&runtime->conversation_generation);
+    memset(runtime->command_history, 0, sizeof(runtime->command_history));
     mybot_presenter_set_vp_registered(&runtime->presenter, false);
     mybot_presenter_clear_server_indicators(&runtime->presenter);
     callbacks.on_remote_audio = rtc_on_remote_audio;
@@ -518,7 +656,6 @@ static void dev_on_conversation_start(const mybot_device_conversation_t *params,
     callbacks.on_rtm_subscribe_result = rtc_on_rtm_subscribe_result;
     callbacks.on_rtm_subscribe_data = rtc_on_rtm_subscribe_data;
 #if MYBOT_ENABLE_VIDEO
-    aosl_atomic_inc(&runtime->video_generation);
     callbacks.on_video_key_frame_requested = rtc_on_video_key_frame_requested;
     callbacks.on_video_target_bitrate_changed = rtc_on_video_target_bitrate_changed;
 #endif
@@ -548,10 +685,11 @@ static void dev_on_conversation_start(const mybot_device_conversation_t *params,
 
 static void dev_on_conversation_stop(void *user_data) {
     mybot_runtime_t *runtime = user_data;
+    aosl_atomic_inc(&runtime->conversation_generation);
+    memset(runtime->command_history, 0, sizeof(runtime->command_history));
     runtime->rtc_channel[0] = '\0';
     runtime->rtc_agent_uid[0] = '\0';
 #if MYBOT_ENABLE_VIDEO
-    aosl_atomic_inc(&runtime->video_generation);
     if (mybot_video_stop(&runtime->video) < 0) {
         AOSL_LOG_ERR("failed to stop video source");
     }

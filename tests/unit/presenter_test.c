@@ -32,6 +32,65 @@ static void lcd_destroy(void *ctx) {
     s_destroy_count++;
 }
 
+static void test_emotion_commands(mybot_presenter_t *presenter) {
+    const uint32_t retained = MYBOT_LCD_INDICATOR_VP_REGISTERED | MYBOT_LCD_INDICATOR_THINKING;
+    mybot_presenter_set_vp_registered(presenter, true);
+    mybot_presenter_update_server_indicator(presenter, MYBOT_LCD_INDICATOR_THINKING, true);
+
+    /* Identical commands are separate one-shot renders; overlays are retained. */
+    int renders_before = s_render_count;
+    assert(mybot_presenter_show_emotion(presenter, MYBOT_LCD_INDICATOR_HAPPY) == 0);
+    assert(mybot_presenter_show_emotion(presenter, MYBOT_LCD_INDICATOR_HAPPY) == 0);
+    assert(s_render_count == renders_before + 2);
+    assert(s_last_content.screen == MYBOT_LCD_SCREEN_IN_CONVERSATION);
+    assert(s_last_content.indicators == (retained | MYBOT_LCD_INDICATOR_HAPPY));
+    assert(presenter->indicators == retained);
+
+    const mybot_lcd_indicator_t remaining_emotions[] = {
+        MYBOT_LCD_INDICATOR_SAD,
+        MYBOT_LCD_INDICATOR_ANGRY,
+        MYBOT_LCD_INDICATOR_SURPRISED,
+    };
+    for (size_t i = 0; i < sizeof(remaining_emotions) / sizeof(remaining_emotions[0]); ++i) {
+        assert(mybot_presenter_show_emotion(presenter, remaining_emotions[i]) == 0);
+        assert(s_last_content.indicators == (retained | remaining_emotions[i]));
+        assert(presenter->indicators == retained);
+    }
+
+    /* Ordinary overlay changes never replay or explicitly clear an emotion command. */
+    mybot_presenter_update_server_indicator(presenter, MYBOT_LCD_INDICATOR_SPEAKING, true);
+    mybot_presenter_show_screen(presenter, MYBOT_LCD_SCREEN_IN_CONVERSATION);
+    assert(s_last_content.indicators ==
+           (MYBOT_LCD_INDICATOR_VP_REGISTERED | MYBOT_LCD_INDICATOR_SPEAKING));
+    assert((s_last_content.indicators & MYBOT_LCD_INDICATOR_EMOTION_MASK) == 0);
+
+    renders_before = s_render_count;
+    assert(mybot_presenter_show_emotion(NULL, MYBOT_LCD_INDICATOR_HAPPY) < 0);
+    assert(mybot_presenter_show_emotion(presenter, MYBOT_LCD_INDICATOR_NONE) < 0);
+    assert(mybot_presenter_show_emotion(presenter, MYBOT_LCD_INDICATOR_VP_REGISTERED) < 0);
+    assert(mybot_presenter_show_emotion(presenter, MYBOT_LCD_INDICATOR_LISTENING) < 0);
+    assert(
+        mybot_presenter_show_emotion(presenter,
+                                     // Invalid combined bits exercise the rejection path.
+                                     // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+                                     MYBOT_LCD_INDICATOR_HAPPY | MYBOT_LCD_INDICATOR_SAD) < 0);
+    assert(s_render_count == renders_before);
+
+    /* A failed command is not retained for the next successful ordinary render. */
+    s_render_result = -1;
+    assert(mybot_presenter_show_emotion(presenter, MYBOT_LCD_INDICATOR_SAD) == -1);
+    assert(s_render_count == renders_before + 1);
+    s_render_result = 0;
+    mybot_presenter_show_screen(presenter, MYBOT_LCD_SCREEN_IN_CONVERSATION);
+    assert(s_render_count == renders_before + 2);
+    assert((s_last_content.indicators & MYBOT_LCD_INDICATOR_EMOTION_MASK) == 0);
+
+    mybot_presenter_show_screen(presenter, MYBOT_LCD_SCREEN_READY);
+    assert(s_last_content.screen == MYBOT_LCD_SCREEN_READY);
+    assert(s_last_content.indicators == MYBOT_LCD_INDICATOR_NONE);
+    assert(presenter->indicators == MYBOT_LCD_INDICATOR_NONE);
+}
+
 int main(void) {
     const mybot_lcd_ops_t ops = {
         .init = lcd_init,
@@ -54,6 +113,7 @@ int main(void) {
     /* Optional LCD absence still permits presenter state updates and cleanup. */
     assert(mybot_presenter_init(&presenter) == 0);
     assert(!presenter.active);
+    assert(mybot_presenter_show_emotion(&presenter, MYBOT_LCD_INDICATOR_HAPPY) < 0);
     mybot_presenter_set_vp_registered(&presenter, true);
     mybot_presenter_show_screen(&presenter, MYBOT_LCD_SCREEN_IN_CONVERSATION);
     assert(presenter.indicators == MYBOT_LCD_INDICATOR_VP_REGISTERED);
@@ -153,6 +213,8 @@ int main(void) {
     mybot_presenter_set_vp_registered(&presenter, false);
     assert(presenter.indicators == MYBOT_LCD_INDICATOR_NONE);
 
+    test_emotion_commands(&presenter);
+
     /* Render failures leave the presenter available for the next update. */
     int renders_before_failure = s_render_count;
     s_render_result = -1;
@@ -178,6 +240,9 @@ int main(void) {
     mybot_presenter_deinit(&presenter);
     mybot_presenter_deinit(&presenter);
     assert(s_destroy_count == 1);
+    int renders_after_destroy = s_render_count;
+    assert(mybot_presenter_show_emotion(&presenter, MYBOT_LCD_INDICATOR_HAPPY) < 0);
+    assert(s_render_count == renders_after_destroy);
     aosl_dtor();
     return 0;
 }
