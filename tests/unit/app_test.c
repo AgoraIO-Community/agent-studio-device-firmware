@@ -46,7 +46,7 @@
 #define TEST_SEND_STREAMS 1
 #endif
 #define TEST_SEND_FRAME_BYTES (TEST_MONO_FRAME_BYTES * TEST_SEND_STREAMS)
-#define TEST_MAX_SENT_FRAMES 32
+#define TEST_MAX_SENT_FRAMES 64
 #define TEST_MIC_BASE 1000
 #define TEST_REF_SAMPLE (-2345)
 
@@ -229,6 +229,7 @@ static int s_playback_start_calls;
 static int s_playback_stop_calls;
 static int s_playback_destroy_calls;
 static int s_playback_write_calls;
+static int s_last_playback_sample;
 static int s_announce_active_checks;
 static int s_device_init_calls;
 static int s_device_shutdown_calls;
@@ -248,6 +249,8 @@ static int s_stop_requests;
 static int s_conversation_ended_notifications;
 static int s_media_volume_set_calls;
 static int s_last_media_volume;
+static int s_emotion_pulses;
+static uint32_t s_last_emotion_indicators;
 static char s_renewed_token[512];
 
 static size_t s_sent_lengths[TEST_MAX_SENT_FRAMES];
@@ -636,6 +639,59 @@ static void emit_rtm_subscribe_data(const char *channel, const char *rtm_uid, co
     callback(channel, rtm_uid, data, len, "json", user_data);
 }
 
+static void control_barrier(const aosl_ts_t *ts, aosl_refobj_t ref, uintptr_t argc,
+                            uintptr_t argv[]) {
+    (void)ts;
+    (void)ref;
+    (void)argv;
+    assert(argc == 0);
+    observe_control_thread(0);
+}
+
+static void drain_device_commands(void) {
+    mock_lock();
+    aosl_mpq_t control = s_test_control_mpq;
+    mock_unlock();
+    assert(!aosl_mpq_invalid(control));
+    assert(aosl_mpq_call(control, AOSL_REF_INVALID, "device_command_test_barrier", control_barrier,
+                         0) == 0);
+}
+
+static void command_timestamp(char *text, size_t capacity, time_t offset) {
+    time_t now = time(NULL);
+    assert(now != (time_t)-1);
+    now += offset;
+    struct tm utc;
+    assert(gmtime_r(&now, &utc) != NULL);
+    assert(strftime(text, capacity, "%Y-%m-%dT%H:%M:%SZ", &utc) > 0);
+}
+
+static void emit_device_command(const char *channel, const char *sender, const char *id,
+                                const char *conversation, const char *command,
+                                const char *issued_override, const char *expires_override) {
+    char issued[32];
+    char expires[32];
+    command_timestamp(issued, sizeof(issued), -60);
+    command_timestamp(expires, sizeof(expires), 300);
+    char message[1024];
+    int length = snprintf(message, sizeof(message),
+                          "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\","
+                          "\"version\":1,\"message_id\":\"msg-%s\",\"command_id\":\"%s\","
+                          "\"conversation_id\":\"%s\",\"issued_at\":\"%s\",\"expires_at\":\"%s\","
+                          "\"command\":%s}",
+                          id, id, conversation, issued_override ? issued_override : issued,
+                          expires_override ? expires_override : expires, command);
+    assert(length > 0 && (size_t)length < sizeof(message));
+    if (channel) {
+        emit_rtm_subscribe_data(channel, sender, message, (size_t)length);
+    } else {
+        emit_rtm_data(sender, message, (size_t)length);
+    }
+}
+
+static const char s_happy_command[] =
+    "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{}}";
+
 bool mybot_platform_registry_is_registered(void) {
     return s_platform_registered;
 }
@@ -667,8 +723,16 @@ int mybot_lcd_show_screen(mybot_lcd_t *lcd, mybot_lcd_screen_t screen) {
 int mybot_lcd_show_content(mybot_lcd_t *lcd, const mybot_lcd_content_t *content) {
     assert(lcd != NULL);
     assert(content != NULL);
+    if (content->indicators & MYBOT_LCD_INDICATOR_EMOTION_MASK) {
+        observe_control_thread(0);
+        assert(content->screen == MYBOT_LCD_SCREEN_IN_CONVERSATION);
+    }
     mock_lock();
     s_last_lcd_content = *content;
+    if (content->indicators & MYBOT_LCD_INDICATOR_EMOTION_MASK) {
+        s_emotion_pulses++;
+        s_last_emotion_indicators = content->indicators;
+    }
     mock_unlock();
     return 0;
 }
@@ -880,6 +944,7 @@ static int playback_write(void *ctx, const void *buf, int frames) {
     }
     if (started) {
         s_playback_write_calls++;
+        s_last_playback_sample = ((const int16_t *)buf)[0];
     }
     mock_unlock();
     return started ? written : 0;
@@ -928,6 +993,7 @@ void mybot_audio_context_init(mybot_audio_t *audio) {
     memset(audio, 0, sizeof(*audio));
     audio->capture_ops = &s_capture_ops;
     audio->playback_ops = &s_playback_ops;
+    aosl_atomic_set(&audio->media_volume, MYBOT_AUDIO_VOLUME_DEFAULT);
 }
 
 int mybot_audio_device_volume_init(mybot_audio_t *audio) {
@@ -962,6 +1028,7 @@ int mybot_audio_set_media_volume(mybot_audio_t *audio, int volume) {
         return -1;
     }
     observe_control_thread(CONTROL_OBS_VOLUME);
+    aosl_atomic_set(&audio->media_volume, volume);
     mock_lock();
     s_media_volume_set_calls++;
     s_last_media_volume = volume;
@@ -971,7 +1038,7 @@ int mybot_audio_set_media_volume(mybot_audio_t *audio, int volume) {
 
 int mybot_audio_get_media_volume(const mybot_audio_t *audio) {
     assert(audio != NULL);
-    return MYBOT_AUDIO_VOLUME_DEFAULT;
+    return (int)aosl_atomic_read(&audio->media_volume);
 }
 
 void mybot_audio_apply_media_volume(const mybot_audio_t *audio, int16_t *pcm, int samples) {
@@ -1070,6 +1137,8 @@ int mybot_device_lifecycle_init(mybot_device_lifecycle_t *lifecycle, mybot_kv_st
     }
     mock_lock();
     s_device_lifecycle = lifecycle;
+    lifecycle->conversation_id[0] = '\0';
+    aosl_atomic_set(&lifecycle->stop_request, 0);
     s_device_callbacks = *callbacks;
     s_device_state = MYBOT_DEVICE_STATE_RUNTIME;
     s_device_start_requested = false;
@@ -1098,6 +1167,7 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
     } action = DEVICE_TICK_IDLE;
 
     mock_lock();
+    s_test_control_mpq = aosl_mpq_this();
     if (s_block_device_tick) {
         s_test_control_mpq = aosl_mpq_this();
         s_device_tick_entered = true;
@@ -1150,6 +1220,8 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
     }
 
     if (action == DEVICE_TICK_STOP) {
+        lifecycle->conversation_id[0] = '\0';
+        aosl_atomic_set(&lifecycle->stop_request, 0);
         if (callbacks.on_conversation_stop) {
             callbacks.on_conversation_stop(callbacks.user_data);
         }
@@ -1176,6 +1248,7 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
     snprintf(params.rtc_uid, sizeof(params.rtc_uid), "%s", "device-uid");
     snprintf(params.rtc_agent_uid, sizeof(params.rtc_agent_uid), "%s", "agent-uid");
     snprintf(params.rtc_token, sizeof(params.rtc_token), "%s", "rtc-token");
+    memcpy(lifecycle->conversation_id, params.conversation_id, sizeof(lifecycle->conversation_id));
     callbacks.on_conversation_start(&params, callbacks.user_data);
 }
 
@@ -1201,6 +1274,8 @@ void mybot_device_lifecycle_shutdown(mybot_device_lifecycle_t *lifecycle) {
     bool stop_conversation = false;
     mock_lock();
     s_device_shutdown_calls++;
+    lifecycle->conversation_id[0] = '\0';
+    aosl_atomic_set(&lifecycle->stop_request, 0);
     if (s_device_state == MYBOT_DEVICE_STATE_IN_CONVERSATION) {
         s_device_state = MYBOT_DEVICE_STATE_RUNTIME;
         callbacks = s_device_callbacks;
@@ -1234,6 +1309,7 @@ void mybot_device_lifecycle_request_stop(mybot_device_lifecycle_t *lifecycle) {
     mock_lock();
     s_stop_requests++;
     s_device_stop_requested = true;
+    aosl_atomic_set(&lifecycle->stop_request, 1);
     mock_unlock();
 }
 
@@ -1737,6 +1813,183 @@ static void test_control_queue_failures(const mybot_config_t *config) {
 }
 #endif
 
+static void test_device_commands(void) {
+    int pulses_before = read_counter(&s_emotion_pulses);
+    int volume_calls_before = read_counter(&s_media_volume_set_calls);
+    /* Rejected deliveries must neither execute nor consume the valid command's ID. */
+    emit_device_command("rtc-channel", "other-uid", "cmd-happy", "conversation-1", s_happy_command,
+                        NULL, NULL);
+    emit_device_command("bad-channel", "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
+                        NULL, NULL);
+    emit_device_command("", "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL,
+                        NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-2", s_happy_command, NULL,
+                        NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
+                        "1970-01-01T00:00:00Z", "1970-01-01T00:00:01Z");
+    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
+                        "9999-01-01T00:00:00Z", "9999-01-01T00:00:01Z");
+    emit_device_command(
+        NULL, "other-uid", "cmd-volume", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":20}}", NULL,
+        NULL);
+    emit_device_command(
+        NULL, "agent-uid", "cmd-volume", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":101}}", NULL,
+        NULL);
+    emit_device_command(
+        NULL, "agent-uid", "cmd-emotion-params", "conversation-1",
+        "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{\"intensity\":0.5}}", NULL,
+        NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-happy\\u0000suffix", "conversation-1",
+                        s_happy_command, NULL, NULL);
+    /* A valid envelope padded beyond the RTM bound must not bypass the length check. */
+    const char envelope[] =
+        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-malformed\",\"command_id\":\"cmd-malformed\","
+        "\"conversation_id\":\"conversation-1\",\"issued_at\":\"1970-01-01T00:00:00Z\","
+        "\"expires_at\":\"9999-01-01T00:00:00Z\","
+        "\"command\":{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{}}}";
+    char malformed[1025];
+    memset(malformed, ' ', sizeof(malformed));
+    memcpy(malformed, envelope, sizeof(envelope) - 1U);
+    emit_rtm_data("agent-uid", malformed, sizeof(malformed));
+    malformed[sizeof(envelope)] = '\0';
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", malformed, sizeof(envelope) + 1U);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before);
+
+    /* Valid-on-receive commands can expire while the control owner is busy. */
+    mock_lock();
+    s_block_device_tick = true;
+    s_device_tick_entered = false;
+    mock_unlock();
+    assert(wait_for_flag(&s_device_tick_entered, 1000));
+    char queued_expiry[32];
+    command_timestamp(queued_expiry, sizeof(queued_expiry), 1);
+    emit_device_command(NULL, "agent-uid", "cmd-queued-expiry", "conversation-1", s_happy_command,
+                        NULL, queued_expiry);
+    aosl_hal_msleep(1100);
+    resume_control_after_queue_test();
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before);
+
+    /* Two RTM routes share one command-ID cache, but a new ID retriggers the same expression. */
+    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL,
+                        NULL);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 1);
+    emit_device_command("rtc-channel", "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
+                        NULL, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 1);
+    emit_device_command("rtc-channel", "agent-uid", "cmd-happy-next", "conversation-1",
+                        s_happy_command, NULL, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 2);
+
+    static const struct {
+        const char *name;
+        const char *id;
+        mybot_lcd_indicator_t indicator;
+    } emotions[] = {
+        {"sad", "cmd-sad", MYBOT_LCD_INDICATOR_SAD},
+        {"angry", "cmd-angry", MYBOT_LCD_INDICATOR_ANGRY},
+        {"surprised", "cmd-surprised", MYBOT_LCD_INDICATOR_SURPRISED},
+    };
+    for (size_t index = 0; index < sizeof(emotions) / sizeof(emotions[0]); ++index) {
+        char action[128];
+        int length = snprintf(action, sizeof(action),
+                              "{\"type\":\"scene\",\"name\":\"emotion.%s\",\"params\":{}}",
+                              emotions[index].name);
+        assert(length > 0 && (size_t)length < sizeof(action));
+        emit_device_command("rtc-channel", "agent-uid", emotions[index].id, "conversation-1",
+                            action, NULL, NULL);
+        drain_device_commands();
+        assert(read_counter(&s_emotion_pulses) == pulses_before + 3 + (int)index);
+        mock_lock();
+        assert(s_last_emotion_indicators ==
+               (MYBOT_LCD_INDICATOR_VP_REGISTERED | MYBOT_LCD_INDICATOR_SPEAKING |
+                emotions[index].indicator));
+        mock_unlock();
+    }
+    const char speaking[] = "{\"event_type\":\"state.speaking\",\"payload\":{\"value\":true}}";
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", speaking, sizeof(speaking) - 1);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 5);
+    mock_lock();
+    assert(s_last_lcd_content.indicators ==
+           (MYBOT_LCD_INDICATOR_VP_REGISTERED | MYBOT_LCD_INDICATOR_SPEAKING));
+    mock_unlock();
+
+    emit_device_command(
+        NULL, "agent-uid", "cmd-volume", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":40}}", NULL,
+        NULL);
+    drain_device_commands();
+    assert(read_counter(&s_last_media_volume) == 40);
+    const char adjust[] =
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-15}}";
+    emit_device_command("rtc-channel", "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL,
+                        NULL);
+    drain_device_commands();
+    assert(read_counter(&s_last_media_volume) == 25);
+    int sets_after_adjust = read_counter(&s_media_volume_set_calls);
+    emit_device_command(NULL, "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_after_adjust);
+    assert(read_counter(&s_last_media_volume) == 25);
+
+    /* Mute changes playback PCM only; the running capture/send workers still upload the mic. */
+    emit_device_command(
+        NULL, "agent-uid", "cmd-mute", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":true}}", NULL,
+        NULL);
+    drain_device_commands();
+    int16_t pcm[TEST_FRAME_SAMPLES];
+    for (int index = 0; index < TEST_FRAME_SAMPLES; ++index) {
+        pcm[index] = 1234;
+    }
+    int writes_before = read_counter(&s_playback_write_calls);
+    int sends_before = read_counter(&s_rtc_send_calls);
+    emit_remote_audio(pcm, sizeof(pcm));
+    assert(wait_for_counter(&s_playback_write_calls, writes_before + 1, 1000));
+    assert(read_counter(&s_last_playback_sample) == 0);
+    assert(wait_for_counter(&s_rtc_send_calls, sends_before + 1, 1000));
+    emit_device_command(
+        "rtc-channel", "agent-uid", "cmd-unmute", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":false}}", NULL,
+        NULL);
+    drain_device_commands();
+    writes_before = read_counter(&s_playback_write_calls);
+    emit_remote_audio(pcm, sizeof(pcm));
+    assert(wait_for_counter(&s_playback_write_calls, writes_before + 1, 1000));
+    assert(read_counter(&s_last_playback_sample) == 1234);
+    assert(read_counter(&s_last_media_volume) == 25);
+    emit_device_command(
+        NULL, "agent-uid", "cmd-volume-restore", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":100}}", NULL,
+        NULL);
+    drain_device_commands();
+    assert(read_counter(&s_last_media_volume) == 100);
+
+    /* Preserve all live IDs when the bounded history fills; do not evict and reapply a delta. */
+    for (int index = 0; index < 6; ++index) {
+        char id[32];
+        assert(snprintf(id, sizeof(id), "cmd-fill-%d", index) > 0);
+        emit_device_command(NULL, "agent-uid", id, "conversation-1", s_happy_command, NULL, NULL);
+    }
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 11);
+    emit_device_command(NULL, "agent-uid", "cmd-overflow", "conversation-1", s_happy_command, NULL,
+                        NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 11);
+    assert(read_counter(&s_last_media_volume) == 100);
+}
+
 int main(void) {
     mybot_config_t config;
     memset(&config, 0, sizeof(config));
@@ -1993,6 +2246,8 @@ int main(void) {
     assert(wait_for_lcd_indicator(MYBOT_LCD_INDICATOR_SPEAKING, 1000));
     assert(wait_for_lcd_indicator_state(MYBOT_LCD_INDICATOR_THINKING, false, 1000));
 
+    test_device_commands();
+
     const char speaking_done_message[] =
         "{\"event_type\":\"state.speaking\",\"payload\":{\"value\":false}}";
     emit_rtm_subscribe_data("rtc-channel", "agent-uid", speaking_done_message,
@@ -2062,6 +2317,16 @@ int main(void) {
     assert(wait_for_counter(&s_rtc_leave_calls, 1, 1000));
     assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
     assert(wait_for_lcd_indicator_state(MYBOT_LCD_INDICATOR_VP_REGISTERED, false, 1000));
+    int emotion_pulses_after_stop = read_counter(&s_emotion_pulses);
+    int volume_sets_after_stop = read_counter(&s_media_volume_set_calls);
+    emit_device_command(NULL, "agent-uid", "cmd-after-stop", "conversation-1", s_happy_command,
+                        NULL, NULL);
+    emit_device_command(
+        "rtc-channel", "agent-uid", "cmd-volume-after-stop", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":0}}", NULL, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == emotion_pulses_after_stop);
+    assert(read_counter(&s_media_volume_set_calls) == volume_sets_after_stop);
     /* Late notifications cannot restore the ended conversation's screen. */
     emit_rtm_subscribe_data("rtc-channel", "agent-uid", vp_message, sizeof(vp_message) - 1U);
     emit_rtm_subscribe_data("rtc-channel", "agent-uid", thinking_message,
@@ -2093,6 +2358,10 @@ int main(void) {
     assert(wait_for_counter(&s_rtc_send_calls, sends_before_second_call + 1, 3000));
     assert(read_counter(&s_rtc_init_calls) == 2);
     assert(read_counter(&s_rtc_leave_calls) == 1);
+    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL,
+                        NULL);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == emotion_pulses_after_stop + 1);
 
     /* Wait until playback applies the pending buffer clear before blocking I/O. */
     int activity_checks = read_counter(&s_announce_active_checks);

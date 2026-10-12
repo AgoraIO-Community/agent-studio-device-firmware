@@ -173,7 +173,7 @@ Implement `mybot_lcd_ops_t` when a display exists. Render receives semantic cont
 application control owner; the SDK does not invoke it concurrently. Content is borrowed. Add the
 operations table to the platform descriptor.
 
-`mybot_lcd_content_t.indicators` is a bitmask for non-exclusive overlays. During
+`mybot_lcd_content_t.indicators` is a bitmask for overlays and one-shot expressions. During
 `MYBOT_LCD_SCREEN_IN_CONVERSATION`, `MYBOT_LCD_INDICATOR_VP_REGISTERED` means the server completed
 voice-print registration for the active conversation. Render this as an in-conversation indicator;
 ignore bits the platform does not recognize and do not derive lifecycle state from the indicator.
@@ -182,6 +182,17 @@ only presentation state and must not change the SDK lifecycle. The
 `MYBOT_LCD_INDICATOR_LISTENING`, `MYBOT_LCD_INDICATOR_THINKING`, and
 `MYBOT_LCD_INDICATOR_SPEAKING` bits expose the server's current conversation phase; these three bits
 are mutually exclusive.
+
+Device commands request `MYBOT_LCD_INDICATOR_HAPPY`, `MYBOT_LCD_INDICATOR_SAD`,
+`MYBOT_LCD_INDICATOR_ANGRY`, or `MYBOT_LCD_INDICATOR_SURPRISED` by including one emotion bit in
+one render call, alongside the retained voiceprint and server-state bits. Each such call starts
+a new expression, even when the bit matches the previous command. Ordinary renders have no
+emotion bit: update overlays without restarting or cancelling the current expression. The SDK
+does not retain expression commands or issue a clearing render. The platform owns expression
+presets and animation timing; a new expression replaces the unfinished one, and leaving
+`MYBOT_LCD_SCREEN_IN_CONVERSATION` ends it. Copy content needed by asynchronous rendering before
+returning, and wait for that work before `destroy()` releases the context. See
+[mybot_lcd.h](../include/mybot/platform/mybot_lcd.h) for the interface contract.
 
 ### Wake words (optional)
 
@@ -404,6 +415,39 @@ the current conversation channel. It also accepts `state.listening`, `state.thin
 `state.speaking` messages with a boolean `payload.value` and exposes them as mutually exclusive LCD
 indicators. The SDK resets these indicators at conversation boundaries and exposes success through
 `MYBOT_LCD_INDICATOR_VP_REGISTERED`; the P2P RTM callback remains available for direct messages.
+
+### MCP device commands
+
+MCP tool invocation and cloud authentication belong to the server. The SDK consumes the documented
+DeviceCommand v1 JSON object directly from RTM; it does not unwrap an undocumented cloud envelope.
+Both P2P and subscribed-channel delivery share one parser; commands execute on `control_mpq`.
+Messages are limited to 1024 bytes; `message_id`, `command_id`, and `conversation_id` must each be
+non-empty and at most 127 bytes. Unknown or duplicate fields, unsupported commands, and invalid
+parameter types are rejected. There is no SDK MCP network client, command ACK, or execution retry.
+
+The object requires `type: "device_command"`, `schema: "botstation.device-command"`, `version: 1`,
+the three IDs, UTC `issued_at` and `expires_at`, and a `command` object with `type`, `name`, and
+`params`. UTC timestamps use `YYYY-MM-DDTHH:MM:SSZ` or `YYYY-MM-DDTHH:MM:SS.sssZ`.
+
+| Command type | Name | Params |
+| --- | --- | --- |
+| `action` | `audio.set_volume` | Integer `level: 0..100` |
+| `action` | `audio.adjust_volume` | Integer `delta: -100..100`; resulting volume clamps to 0..100 |
+| `action` | `audio.set_mute` | Boolean `muted` |
+| `scene` | `emotion.happy`, `emotion.sad`, `emotion.angry`, `emotion.surprised` | Empty object `{}` only |
+
+Volume commands reuse the key-volume path: active hardware volume takes priority, otherwise the
+SDK applies software gain. Mute silences both RTC playback and local prompts, preserves the logical
+volume, and leaves microphone capture/uplink running. Cloud AEC reference uses PCM actually accepted
+by playback, including silence while muted; prompts remain excluded.
+
+At execution, the SDK matches the RTM sender, channel when present, and body conversation ID exactly
+against the active session. The AOSL HAL must provide reliable UTC milliseconds through
+`aosl_time_ms()`. The SDK validates `issued_at <= now < expires_at` against its actual return value
+at execution after queuing; it cannot independently identify an uptime-only or unsynchronized clock.
+The product must synchronize UTC before accepting commands; the SDK adds no time-sync task or
+platform clock interface. A per-conversation cache holds up to 16 command IDs until expiry, rejecting duplicate
+execution; expired entries are reclaimed and the cache is cleared at conversation boundaries.
 
 ## Step 7: Cross-compile
 

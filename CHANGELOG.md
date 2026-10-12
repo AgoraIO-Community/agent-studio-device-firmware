@@ -6,6 +6,11 @@ This project follows Semantic Versioning.
 
 ### Added
 
+- Handle cloud MCP DeviceCommand v1 messages through the existing RTM/control path with exact
+  session, UTC validity, and bounded command-ID deduplication checks. Reuse hardware/software
+  playback volume control and add independent speaker mute without stopping microphone uplink.
+- Deliver happy, sad, angry, and surprised expressions as one-shot LCD indicator requests,
+  preserving voiceprint/server overlays and keeping expression rendering on the platform.
 - Expand unit coverage for protocol boundaries, allocation failures, callback ownership,
   partial-start cleanup and recovery, including a standalone KV facade test and video-disabled
   lifecycle checks.
@@ -14,6 +19,8 @@ This project follows Semantic Versioning.
 
 ### Fixed
 
+- Use atomic GCC coverage counters to prevent corrupt branch counts during concurrent worker
+  and test execution.
 - Avoid overflow when combining JSON fractional scale with extreme negative exponents,
   reject non-finite or unrepresentable numbers before integer conversion, and preserve
   signed 64-bit integer values when printing JSON.

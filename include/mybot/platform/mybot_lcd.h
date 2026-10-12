@@ -21,11 +21,12 @@ extern "C" {
 #define MYBOT_LCD_PAIR_CODE_CAPACITY 16
 
 /**
- * Non-exclusive indicators that may be overlaid on a workflow screen.
+ * Indicators that may be overlaid on a workflow screen.
  *
  * Indicators are represented as a bitmask in mybot_lcd_content_t. Platforms
  * should ignore bits they do not recognize and must not change the base screen
- * layout when no supported indicator is set.
+ * layout when no supported indicator is set. Server states are mutually exclusive;
+ * emotions are mutually exclusive, one-shot expression commands.
  */
 typedef enum {
     /** No additional indicator. */
@@ -38,6 +39,14 @@ typedef enum {
     MYBOT_LCD_INDICATOR_THINKING = 1u << 2,
     /** The server is speaking to the user. */
     MYBOT_LCD_INDICATOR_SPEAKING = 1u << 3,
+    /** Display a happy expression. */
+    MYBOT_LCD_INDICATOR_HAPPY = 1u << 4,
+    /** Display a sad expression. */
+    MYBOT_LCD_INDICATOR_SAD = 1u << 5,
+    /** Display an angry expression. */
+    MYBOT_LCD_INDICATOR_ANGRY = 1u << 6,
+    /** Display a surprised expression. */
+    MYBOT_LCD_INDICATOR_SURPRISED = 1u << 7,
 } mybot_lcd_indicator_t;
 
 /**
@@ -45,6 +54,13 @@ typedef enum {
  */
 #define MYBOT_LCD_INDICATOR_SERVER_STATE_MASK                                                      \
     (MYBOT_LCD_INDICATOR_LISTENING | MYBOT_LCD_INDICATOR_THINKING | MYBOT_LCD_INDICATOR_SPEAKING)
+
+/**
+ * Mask of the mutually exclusive, one-shot emotion indicators.
+ */
+#define MYBOT_LCD_INDICATOR_EMOTION_MASK                                                           \
+    (MYBOT_LCD_INDICATOR_HAPPY | MYBOT_LCD_INDICATOR_SAD | MYBOT_LCD_INDICATOR_ANGRY |             \
+     MYBOT_LCD_INDICATOR_SURPRISED)
 
 /**
  * Workflow screens rendered by the SDK.
@@ -89,10 +105,14 @@ typedef struct {
      */
     char pair_code[MYBOT_LCD_PAIR_CODE_CAPACITY];
     /**
-     * Optional non-exclusive screen indicators. This field is currently
-     * meaningful on MYBOT_LCD_SCREEN_IN_CONVERSATION; other screens should
+     * Optional screen indicators, meaningful on MYBOT_LCD_SCREEN_IN_CONVERSATION.
+     * Other screens should
      * normally be rendered with MYBOT_LCD_INDICATOR_NONE. The listening,
      * thinking and speaking bits are mutually exclusive server-state overlays.
+     * Each render call containing an emotion bit triggers a new expression,
+     * including consecutive calls with the same bit.
+     * Ordinary renders without an emotion bit update the retained overlays and
+     * must not restart or cancel the platform's current expression.
      *
      * @note The field is appended to the 1.1.0 content structure. Build the
      *       SDK and platform LCD adapter against the same public header.
@@ -106,6 +126,7 @@ typedef struct {
  * render() receives semantic content so each platform can choose its own
  * layout, fonts, icons, or QR-code presentation. The content pointer is valid
  * only for the duration of the call and must not be retained by the implementation.
+ * Copy any content needed by asynchronous display tasks before returning.
  *
  * @note render() is called by the application control owner. The SDK does not
  *       invoke render() concurrently.
@@ -122,6 +143,12 @@ typedef struct {
     /**
      * Render one workflow screen.
      *
+     * Submit emotion commands quickly; expression duration and animation timing
+     * belong to the platform. A new emotion replaces the unfinished expression.
+     * Rendering a screen other than MYBOT_LCD_SCREEN_IN_CONVERSATION must cancel
+     * any current expression. The SDK does not retry a failed emotion render or
+     * replay it on a later ordinary render.
+     *
      * @param ctx     LCD implementation context from init()
      * @param content semantic screen content; borrowed for the duration of
      *                 the call
@@ -133,6 +160,7 @@ typedef struct {
      * Release the display.
      *
      * Called by the application control owner after all render calls have stopped.
+     * Cancel and wait for any asynchronous display work before releasing the context.
      *
      * @param ctx LCD implementation context from init()
      */
