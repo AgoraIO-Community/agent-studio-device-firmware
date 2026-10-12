@@ -57,7 +57,7 @@
   `MYBOT_LCD_INDICATOR_VP_REGISTERED` 向 LCD 提供会话内叠加指示。
 - **云端 MCP 设备命令**：通过 RTM 接收绑定当前会话的 DeviceCommand v1 消息，控制播放
   音量/静音，并向 LCD 请求开心、难过、生气或惊讶表情。MCP 工具调用由云端负责，SDK
-  复用现有媒体和 LCD 路径。集成及 UTC 时钟要求见
+  复用现有媒体和 LCD 路径。集成说明见
   [PORTING.zh-CN.md](docs/PORTING.zh-CN.md#mcp-设备命令)。
 - **配对码语音播报**：每个配对码只播报一次，先播固定提示句（“请在控制台输入配对码”），
   再逐位播报数字，走正常扬声器链路。音频资源为 `./assets/locales/<locale>/` 下的原始 16 kHz

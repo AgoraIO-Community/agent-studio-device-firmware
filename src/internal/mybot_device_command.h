@@ -6,7 +6,6 @@
 #include "mybot/platform/mybot_lcd.h"
 
 #include <stdbool.h>
-#include <stdint.h>
 
 #define MYBOT_DEVICE_COMMAND_ID_CAPACITY 128
 
@@ -22,8 +21,6 @@ typedef struct {
     char message_id[MYBOT_DEVICE_COMMAND_ID_CAPACITY];
     char command_id[MYBOT_DEVICE_COMMAND_ID_CAPACITY];
     char conversation_id[MYBOT_DEVICE_COMMAND_ID_CAPACITY];
-    uint64_t issued_at_ms;
-    uint64_t expires_at_ms;
     union {
         int volume;
         int delta;
@@ -32,7 +29,8 @@ typedef struct {
     } params;
 } mybot_device_command_t;
 
-/* Parse DeviceCommand v1 without execution, clock, or session access.
+/* Parse DeviceCommand v1 without execution or session access.
+ * issued_at and expires_at are optional and ignored.
  * root is borrowed; command owns its fields and is valid only on success. */
 bool mybot_device_command_parse(const mybot_json_t *root, mybot_device_command_t *command);
 

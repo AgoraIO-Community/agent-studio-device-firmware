@@ -426,8 +426,9 @@ non-empty and at most 127 bytes. Unknown or duplicate fields, unsupported comman
 parameter types are rejected. There is no SDK MCP network client, command ACK, or execution retry.
 
 The object requires `type: "device_command"`, `schema: "botstation.device-command"`, `version: 1`,
-the three IDs, UTC `issued_at` and `expires_at`, and a `command` object with `type`, `name`, and
-`params`. UTC timestamps use `YYYY-MM-DDTHH:MM:SSZ` or `YYYY-MM-DDTHH:MM:SS.sssZ`.
+the three IDs, and a `command` object with `type`, `name`, and `params`. The `issued_at` and
+`expires_at` fields may be omitted or included; the SDK currently ignores them and does not check
+command validity periods or require clock synchronization.
 
 | Command type | Name | Params |
 | --- | --- | --- |
@@ -442,12 +443,10 @@ volume, and leaves microphone capture/uplink running. Cloud AEC reference uses P
 by playback, including silence while muted; prompts remain excluded.
 
 At execution, the SDK matches the RTM sender, channel when present, and body conversation ID exactly
-against the active session. The AOSL HAL must provide reliable UTC milliseconds through
-`aosl_time_ms()`. The SDK validates `issued_at <= now < expires_at` against its actual return value
-at execution after queuing; it cannot independently identify an uptime-only or unsynchronized clock.
-The product must synchronize UTC before accepting commands; the SDK adds no time-sync task or
-platform clock interface. A per-conversation cache holds up to 16 command IDs until expiry, rejecting duplicate
-execution; expired entries are reclaimed and the cache is cleared at conversation boundaries.
+against the active session. A per-conversation FIFO cache retains the 16 most recently accepted
+command IDs. A duplicate still in the cache is ignored without refreshing its position; a new ID
+replaces the oldest entry when the cache is full. An ID outside this window may execute again.
+The cache is cleared at conversation boundaries.
 
 ## Step 7: Cross-compile
 

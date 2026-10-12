@@ -72,8 +72,8 @@ RTOS, or a bare-metal MCU.
   and exposes `MYBOT_LCD_INDICATOR_VP_REGISTERED` as an in-conversation LCD overlay.
 - **Cloud MCP device commands**: Receive session-bound DeviceCommand v1 messages over RTM to
   control playback volume/mute and request happy, sad, angry, or surprised LCD expressions.
-  The cloud owns MCP tool invocation; the SDK reuses its media and LCD paths. Integration and
-  UTC clock requirements are described in [PORTING.md](docs/PORTING.md#mcp-device-commands).
+  The cloud owns MCP tool invocation; the SDK reuses its media and LCD paths. Integration is
+  described in [PORTING.md](docs/PORTING.md#mcp-device-commands).
 - **Pairing-code voice prompt**: Once per pair code, plays a fixed prompt ("Please enter the
   pairing code in the console") followed by one sound per digit through the normal speaker path. Assets are raw
   16 kHz mono s16 PCM files under `./assets/locales/<locale>/` (`prompt.pcm`, `0.pcm`..`9.pcm`);
