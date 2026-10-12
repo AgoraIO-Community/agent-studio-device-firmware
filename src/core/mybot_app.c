@@ -40,11 +40,6 @@ static const char k_rtm_state_thinking[] = "state.thinking";
 static const char k_rtm_state_speaking[] = "state.speaking";
 
 typedef struct {
-    char id[MYBOT_DEVICE_COMMAND_ID_CAPACITY];
-    uint64_t expires_at_ms;
-} command_history_entry_t;
-
-typedef struct {
     aosl_atomic_t running;
     mybot_state_model_t state_model;
     aosl_atomic_t aosl_ref_held;
@@ -59,7 +54,8 @@ typedef struct {
     mybot_video_t video;
 #endif
     aosl_atomic_t conversation_generation;
-    command_history_entry_t command_history[COMMAND_HISTORY_SIZE];
+    char command_history[COMMAND_HISTORY_SIZE][MYBOT_DEVICE_COMMAND_ID_CAPACITY];
+    size_t command_history_next;
     mybot_device_lifecycle_t lifecycle;
     /* Snapshots used to reject stale RTM events from a previous conversation. */
     char rtc_channel[128];
@@ -240,26 +236,17 @@ typedef struct {
     mybot_device_command_t command;
 } device_command_event_t;
 
-/* Retain accepted IDs until expiry; never evict a live ID and execute its duplicate. */
-static bool remember_command(mybot_runtime_t *runtime, const mybot_device_command_t *command,
-                             uint64_t now_ms) {
-    command_history_entry_t *available = NULL;
+/* Suppress duplicates among the most recent accepted command IDs for this conversation. */
+static bool remember_command(mybot_runtime_t *runtime, const mybot_device_command_t *command) {
     for (size_t i = 0; i < COMMAND_HISTORY_SIZE; ++i) {
-        command_history_entry_t *entry = &runtime->command_history[i];
-        if (entry->id[0] && strcmp(entry->id, command->command_id) == 0) {
+        if (strcmp(runtime->command_history[i], command->command_id) == 0) {
             AOSL_LOG_DBG("[RTM] duplicate device command ignored");
             return false;
         }
-        if (!available && (!entry->id[0] || entry->expires_at_ms <= now_ms)) {
-            available = entry;
-        }
     }
-    if (!available) {
-        AOSL_LOG_WRN("[RTM] device command ignored: active ID history is full");
-        return false;
-    }
-    memcpy(available->id, command->command_id, strlen(command->command_id) + 1U);
-    available->expires_at_ms = command->expires_at_ms;
+    memcpy(runtime->command_history[runtime->command_history_next], command->command_id,
+           strlen(command->command_id) + 1U);
+    runtime->command_history_next = (runtime->command_history_next + 1U) % COMMAND_HISTORY_SIZE;
     return true;
 }
 
@@ -283,13 +270,7 @@ static void handle_device_command(const aosl_ts_t *ts, aosl_refobj_t ref, uintpt
         AOSL_LOG_DBG("[RTM] device command ignored: inactive or different conversation");
         goto done;
     }
-    /* The HAL must supply synchronized UTC, not uptime. Check at execution after queue delays. */
-    uint64_t now_ms = aosl_time_ms();
-    if (now_ms == 0 || now_ms < command->issued_at_ms || now_ms >= command->expires_at_ms) {
-        AOSL_LOG_WRN("[RTM] device command ignored: expired or UTC time is not ready");
-        goto done;
-    }
-    if (!remember_command(runtime, command, now_ms)) {
+    if (!remember_command(runtime, command)) {
         goto done;
     }
     int ret = 0;
@@ -646,6 +627,7 @@ static void dev_on_conversation_start(const mybot_device_conversation_t *params,
     snprintf(runtime->rtc_agent_uid, sizeof(runtime->rtc_agent_uid), "%s", params->rtc_agent_uid);
     aosl_atomic_inc(&runtime->conversation_generation);
     memset(runtime->command_history, 0, sizeof(runtime->command_history));
+    runtime->command_history_next = 0;
     mybot_presenter_set_vp_registered(&runtime->presenter, false);
     mybot_presenter_clear_server_indicators(&runtime->presenter);
     callbacks.on_remote_audio = rtc_on_remote_audio;
@@ -687,6 +669,7 @@ static void dev_on_conversation_stop(void *user_data) {
     mybot_runtime_t *runtime = user_data;
     aosl_atomic_inc(&runtime->conversation_generation);
     memset(runtime->command_history, 0, sizeof(runtime->command_history));
+    runtime->command_history_next = 0;
     runtime->rtc_channel[0] = '\0';
     runtime->rtc_agent_uid[0] = '\0';
 #if MYBOT_ENABLE_VIDEO

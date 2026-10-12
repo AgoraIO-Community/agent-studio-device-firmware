@@ -7,8 +7,9 @@ This project follows Semantic Versioning.
 ### Added
 
 - Handle cloud MCP DeviceCommand v1 messages through the existing RTM/control path with exact
-  session, UTC validity, and bounded command-ID deduplication checks. Reuse hardware/software
-  playback volume control and add independent speaker mute without stopping microphone uplink.
+  session checks and deduplication of the 16 most recently accepted command IDs. Reuse
+  hardware/software playback volume control and add independent speaker mute without stopping
+  microphone uplink.
 - Deliver happy, sad, angry, and surprised expressions as one-shot LCD indicator requests,
   preserving voiceprint/server overlays and keeping expression rendering on the platform.
 - Expand unit coverage for protocol boundaries, allocation failures, callback ownership,
@@ -19,6 +20,9 @@ This project follows Semantic Versioning.
 
 ### Fixed
 
+- Remove the UTC clock dependency from MCP device commands. `issued_at` and `expires_at` are
+  optional and currently ignored; a full command-ID cache replaces its oldest entry instead of
+  rejecting new commands.
 - Use atomic GCC coverage counters to prevent corrupt branch counts during concurrent worker
   and test execution.
 - Avoid overflow when combining JSON fractional scale with extreme negative exponents,

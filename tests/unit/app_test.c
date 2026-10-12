@@ -657,30 +657,15 @@ static void drain_device_commands(void) {
                          0) == 0);
 }
 
-static void command_timestamp(char *text, size_t capacity, time_t offset) {
-    time_t now = time(NULL);
-    assert(now != (time_t)-1);
-    now += offset;
-    struct tm utc;
-    assert(gmtime_r(&now, &utc) != NULL);
-    assert(strftime(text, capacity, "%Y-%m-%dT%H:%M:%SZ", &utc) > 0);
-}
-
 static void emit_device_command(const char *channel, const char *sender, const char *id,
                                 const char *conversation, const char *command,
-                                const char *issued_override, const char *expires_override) {
-    char issued[32];
-    char expires[32];
-    command_timestamp(issued, sizeof(issued), -60);
-    command_timestamp(expires, sizeof(expires), 300);
+                                const char *metadata) {
     char message[1024];
     int length = snprintf(message, sizeof(message),
                           "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\","
                           "\"version\":1,\"message_id\":\"msg-%s\",\"command_id\":\"%s\","
-                          "\"conversation_id\":\"%s\",\"issued_at\":\"%s\",\"expires_at\":\"%s\","
-                          "\"command\":%s}",
-                          id, id, conversation, issued_override ? issued_override : issued,
-                          expires_override ? expires_override : expires, command);
+                          "\"conversation_id\":\"%s\",\"command\":%s%s}",
+                          id, id, conversation, command, metadata ? metadata : "");
     assert(length > 0 && (size_t)length < sizeof(message));
     if (channel) {
         emit_rtm_subscribe_data(channel, sender, message, (size_t)length);
@@ -1818,37 +1803,27 @@ static void test_device_commands(void) {
     int volume_calls_before = read_counter(&s_media_volume_set_calls);
     /* Rejected deliveries must neither execute nor consume the valid command's ID. */
     emit_device_command("rtc-channel", "other-uid", "cmd-happy", "conversation-1", s_happy_command,
-                        NULL, NULL);
+                        NULL);
     emit_device_command("bad-channel", "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
-                        NULL, NULL);
-    emit_device_command("", "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL,
                         NULL);
-    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-2", s_happy_command, NULL,
-                        NULL);
-    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
-                        "1970-01-01T00:00:00Z", "1970-01-01T00:00:01Z");
-    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
-                        "9999-01-01T00:00:00Z", "9999-01-01T00:00:01Z");
+    emit_device_command("", "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-2", s_happy_command, NULL);
     emit_device_command(
         NULL, "other-uid", "cmd-volume", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":20}}", NULL,
-        NULL);
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":20}}", NULL);
     emit_device_command(
         NULL, "agent-uid", "cmd-volume", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":101}}", NULL,
-        NULL);
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":101}}", NULL);
     emit_device_command(
         NULL, "agent-uid", "cmd-emotion-params", "conversation-1",
-        "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{\"intensity\":0.5}}", NULL,
-        NULL);
+        "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{\"intensity\":0.5}}", NULL);
     emit_device_command(NULL, "agent-uid", "cmd-happy\\u0000suffix", "conversation-1",
-                        s_happy_command, NULL, NULL);
+                        s_happy_command, NULL);
     /* A valid envelope padded beyond the RTM bound must not bypass the length check. */
     const char envelope[] =
         "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
         "\"message_id\":\"msg-malformed\",\"command_id\":\"cmd-malformed\","
-        "\"conversation_id\":\"conversation-1\",\"issued_at\":\"1970-01-01T00:00:00Z\","
-        "\"expires_at\":\"9999-01-01T00:00:00Z\","
+        "\"conversation_id\":\"conversation-1\","
         "\"command\":{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{}}}";
     char malformed[1025];
     memset(malformed, ' ', sizeof(malformed));
@@ -1860,32 +1835,30 @@ static void test_device_commands(void) {
     assert(read_counter(&s_emotion_pulses) == pulses_before);
     assert(read_counter(&s_media_volume_set_calls) == volume_calls_before);
 
-    /* Valid-on-receive commands can expire while the control owner is busy. */
-    mock_lock();
-    s_block_device_tick = true;
-    s_device_tick_entered = false;
-    mock_unlock();
-    assert(wait_for_flag(&s_device_tick_entered, 1000));
-    char queued_expiry[32];
-    command_timestamp(queued_expiry, sizeof(queued_expiry), 1);
-    emit_device_command(NULL, "agent-uid", "cmd-queued-expiry", "conversation-1", s_happy_command,
-                        NULL, queued_expiry);
-    aosl_hal_msleep(1100);
-    resume_control_after_queue_test();
+    /* Timestamp metadata does not gate execution, even for past, future or reversed windows. */
+    emit_device_command(NULL, "agent-uid", "cmd-past", "conversation-1", s_happy_command,
+                        ",\"issued_at\":\"1970-01-01T00:00:00Z\","
+                        "\"expires_at\":\"1970-01-01T00:00:01Z\"");
+    emit_device_command(NULL, "agent-uid", "cmd-future", "conversation-1", s_happy_command,
+                        ",\"issued_at\":\"9999-01-01T00:00:00Z\","
+                        "\"expires_at\":\"9999-01-01T00:00:01Z\"");
+    emit_device_command(NULL, "agent-uid", "cmd-reversed", "conversation-1", s_happy_command,
+                        ",\"issued_at\":\"9999-01-01T00:00:00Z\","
+                        "\"expires_at\":\"1970-01-01T00:00:00Z\"");
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before);
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 3);
+    pulses_before += 3;
 
     /* Two RTM routes share one command-ID cache, but a new ID retriggers the same expression. */
-    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL,
-                        NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL);
     drain_device_commands();
     assert(read_counter(&s_emotion_pulses) == pulses_before + 1);
     emit_device_command("rtc-channel", "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
-                        NULL, NULL);
+                        NULL);
     drain_device_commands();
     assert(read_counter(&s_emotion_pulses) == pulses_before + 1);
     emit_device_command("rtc-channel", "agent-uid", "cmd-happy-next", "conversation-1",
-                        s_happy_command, NULL, NULL);
+                        s_happy_command, NULL);
     drain_device_commands();
     assert(read_counter(&s_emotion_pulses) == pulses_before + 2);
 
@@ -1905,7 +1878,7 @@ static void test_device_commands(void) {
                               emotions[index].name);
         assert(length > 0 && (size_t)length < sizeof(action));
         emit_device_command("rtc-channel", "agent-uid", emotions[index].id, "conversation-1",
-                            action, NULL, NULL);
+                            action, NULL);
         drain_device_commands();
         assert(read_counter(&s_emotion_pulses) == pulses_before + 3 + (int)index);
         mock_lock();
@@ -1925,18 +1898,16 @@ static void test_device_commands(void) {
 
     emit_device_command(
         NULL, "agent-uid", "cmd-volume", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":40}}", NULL,
-        NULL);
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":40}}", NULL);
     drain_device_commands();
     assert(read_counter(&s_last_media_volume) == 40);
     const char adjust[] =
         "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-15}}";
-    emit_device_command("rtc-channel", "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL,
-                        NULL);
+    emit_device_command("rtc-channel", "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL);
     drain_device_commands();
     assert(read_counter(&s_last_media_volume) == 25);
     int sets_after_adjust = read_counter(&s_media_volume_set_calls);
-    emit_device_command(NULL, "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL);
     drain_device_commands();
     assert(read_counter(&s_media_volume_set_calls) == sets_after_adjust);
     assert(read_counter(&s_last_media_volume) == 25);
@@ -1944,8 +1915,7 @@ static void test_device_commands(void) {
     /* Mute changes playback PCM only; the running capture/send workers still upload the mic. */
     emit_device_command(
         NULL, "agent-uid", "cmd-mute", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":true}}", NULL,
-        NULL);
+        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":true}}", NULL);
     drain_device_commands();
     int16_t pcm[TEST_FRAME_SAMPLES];
     for (int index = 0; index < TEST_FRAME_SAMPLES; ++index) {
@@ -1959,8 +1929,7 @@ static void test_device_commands(void) {
     assert(wait_for_counter(&s_rtc_send_calls, sends_before + 1, 1000));
     emit_device_command(
         "rtc-channel", "agent-uid", "cmd-unmute", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":false}}", NULL,
-        NULL);
+        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":false}}", NULL);
     drain_device_commands();
     writes_before = read_counter(&s_playback_write_calls);
     emit_remote_audio(pcm, sizeof(pcm));
@@ -1969,24 +1938,32 @@ static void test_device_commands(void) {
     assert(read_counter(&s_last_media_volume) == 25);
     emit_device_command(
         NULL, "agent-uid", "cmd-volume-restore", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":100}}", NULL,
-        NULL);
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":100}}", NULL);
     drain_device_commands();
     assert(read_counter(&s_last_media_volume) == 100);
 
-    /* Preserve all live IDs when the bounded history fills; do not evict and reapply a delta. */
-    for (int index = 0; index < 6; ++index) {
+    /* The last 16 accepted IDs remain deduplicated while new IDs replace the oldest. */
+    for (int index = 0; index < 21; ++index) {
         char id[32];
         assert(snprintf(id, sizeof(id), "cmd-fill-%d", index) > 0);
-        emit_device_command(NULL, "agent-uid", id, "conversation-1", s_happy_command, NULL, NULL);
+        emit_device_command(NULL, "agent-uid", id, "conversation-1", s_happy_command, NULL);
     }
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 11);
-    emit_device_command(NULL, "agent-uid", "cmd-overflow", "conversation-1", s_happy_command, NULL,
-                        NULL);
-    emit_device_command(NULL, "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL, NULL);
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 26);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-20", "conversation-1", s_happy_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-5", "conversation-1", s_happy_command, NULL);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 11);
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 26);
+    /* A duplicate does not refresh its FIFO position: the next new ID evicts cmd-fill-5. */
+    emit_device_command(NULL, "agent-uid", "cmd-fill-21", "conversation-1", s_happy_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-5", "conversation-1", s_happy_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-0", "conversation-1", s_happy_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 29);
+    /* Cache cmd-happy again so the next conversation also verifies that history is cleared. */
+    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_emotion_pulses) == pulses_before + 30);
     assert(read_counter(&s_last_media_volume) == 100);
 }
 
@@ -2320,10 +2297,10 @@ int main(void) {
     int emotion_pulses_after_stop = read_counter(&s_emotion_pulses);
     int volume_sets_after_stop = read_counter(&s_media_volume_set_calls);
     emit_device_command(NULL, "agent-uid", "cmd-after-stop", "conversation-1", s_happy_command,
-                        NULL, NULL);
+                        NULL);
     emit_device_command(
         "rtc-channel", "agent-uid", "cmd-volume-after-stop", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":0}}", NULL, NULL);
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":0}}", NULL);
     drain_device_commands();
     assert(read_counter(&s_emotion_pulses) == emotion_pulses_after_stop);
     assert(read_counter(&s_media_volume_set_calls) == volume_sets_after_stop);
@@ -2358,8 +2335,7 @@ int main(void) {
     assert(wait_for_counter(&s_rtc_send_calls, sends_before_second_call + 1, 3000));
     assert(read_counter(&s_rtc_init_calls) == 2);
     assert(read_counter(&s_rtc_leave_calls) == 1);
-    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL,
-                        NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL);
     drain_device_commands();
     assert(read_counter(&s_emotion_pulses) == emotion_pulses_after_stop + 1);
 

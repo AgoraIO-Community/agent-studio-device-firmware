@@ -76,7 +76,7 @@ Preallocated PCM arrays do **not** make the end-to-end audio path allocation-fre
   be loaded into RAM; account for the actual adapter implementation.
 - **Device commands:** bounded parsed-command events and a 16-entry deduplication cache add control
   storage, not a new worker or frame queue. Include JSON parsing, queued event ownership, and cache
-  entry padding in target heap and static-memory measurements. Protocol and UTC clock requirements
+  entry padding in target heap and static-memory measurements. Protocol and deduplication limits
   are covered in [PORTING.md](PORTING.md#mcp-device-commands).
 
 Measure peak heap, minimum free heap, largest free block, and allocation rate during sustained

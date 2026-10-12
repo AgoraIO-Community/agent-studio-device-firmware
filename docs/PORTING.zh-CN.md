@@ -369,8 +369,8 @@ MCP 工具调用及云端鉴权由服务端负责。SDK 直接接收 RTM 中已�
 命令 ACK 或执行重试。
 
 对象必需包含 `type: "device_command"`、`schema: "botstation.device-command"`、`version: 1`、
-上述三个 ID、UTC `issued_at` 与 `expires_at`，以及含 `type`、`name`、`params` 的 `command`
-对象。UTC 时间格式为 `YYYY-MM-DDTHH:MM:SSZ` 或 `YYYY-MM-DDTHH:MM:SS.sssZ`。
+上述三个 ID，以及含 `type`、`name`、`params` 的 `command` 对象。`issued_at` 与 `expires_at`
+可省略或携带，SDK 当前忽略这两个字段，不校验命令有效期，也不要求时钟同步。
 
 | Command type | Name | Params |
 | --- | --- | --- |
@@ -384,11 +384,9 @@ MCP 工具调用及云端鉴权由服务端负责。SDK 直接接收 RTM 中已�
 实际接受的 PCM，静音时为零；提示音仍不进入参考。
 
 执行时，SDK 将实际 RTM 发送方、频道消息的 channel 及正文 conversation ID 与当前会话
-完整匹配。目标 AOSL HAL 必须通过 `aosl_time_ms()` 提供可靠的 UTC 毫秒时间。SDK 在排队后
-的实际执行时，使用该接口的实际返回值验证 `issued_at <= now < expires_at`，无法独立识别
-开机计时或未同步的时钟。产品必须在接收命令前完成 UTC 同步；SDK 不新增时间同步任务或
-平台时钟接口。每个会话用最多 16 个 command ID 缓存防止重复执行，
-过期条目回收，会话边界清空缓存。
+完整匹配。每个会话的 FIFO 缓存保留最近接受的 16 个 command ID。仍在缓存中的重复 ID
+被忽略且不刷新位置；缓存满后，新 ID 替换最早的条目。超出此窗口的旧 ID 可能再次执行。
+会话边界清空缓存。
 
 ## 第 7 步：交叉编译
 

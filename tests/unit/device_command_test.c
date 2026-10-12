@@ -9,19 +9,14 @@
 #include <string.h>
 
 #define VALID_ACTION "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":50}}"
-#define DEFAULT_ISSUED "2026-09-21T10:00:00.000Z"
-#define DEFAULT_EXPIRES "2026-09-21T10:00:10.000Z"
-
-static mybot_json_t *fixture(const char *command, const char *issued, const char *expires,
-                             const char *extra) {
+static mybot_json_t *fixture(const char *command, const char *extra) {
     char text[2048];
-    int length =
-        snprintf(text, sizeof(text),
-                 "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\","
-                 "\"version\":1,\"message_id\":\"msg-1\",\"command_id\":\"cmd-1\","
-                 "\"conversation_id\":\"conv-1\",\"issued_at\":\"%s\",\"expires_at\":\"%s\","
-                 "\"command\":%s%s}",
-                 issued, expires, command, extra);
+    int length = snprintf(text, sizeof(text),
+                          "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\","
+                          "\"version\":1,\"message_id\":\"msg-1\",\"command_id\":\"cmd-1\","
+                          "\"conversation_id\":\"conv-1\","
+                          "\"command\":%s%s}",
+                          command, extra);
     assert(length > 0 && (size_t)length < sizeof(text));
     mybot_json_t *root = mybot_json_parse(text);
     assert(root != NULL);
@@ -29,7 +24,7 @@ static mybot_json_t *fixture(const char *command, const char *issued, const char
 }
 
 static bool parse(const char *command, mybot_device_command_t *result) {
-    mybot_json_t *root = fixture(command, DEFAULT_ISSUED, DEFAULT_EXPIRES, "");
+    mybot_json_t *root = fixture(command, "");
     bool valid = mybot_device_command_parse(root, result);
     mybot_json_delete(root);
     return valid;
@@ -42,8 +37,6 @@ static void test_valid_commands(void) {
     assert(strcmp(command.message_id, "msg-1") == 0);
     assert(strcmp(command.command_id, "cmd-1") == 0);
     assert(strcmp(command.conversation_id, "conv-1") == 0);
-    assert(command.issued_at_ms == UINT64_C(1789984800000));
-    assert(command.expires_at_ms == command.issued_at_ms + 10000);
 
     assert(
         parse("{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-10}}",
@@ -147,13 +140,13 @@ static void test_envelope(void) {
     mybot_device_command_t result;
     assert(!mybot_device_command_parse(NULL, &result));
     assert(!mybot_device_command_parse(NULL, NULL));
-    mybot_json_t *root = fixture(VALID_ACTION, DEFAULT_ISSUED, DEFAULT_EXPIRES, "");
+    mybot_json_t *root = fixture(VALID_ACTION, "");
     assert(!mybot_device_command_parse(root, NULL));
     mybot_json_delete(root);
 
     static const char *const extras[] = {",\"version\":1", ",\"extra\":0", ",\"Version\":1"};
     for (size_t index = 0; index < sizeof(extras) / sizeof(extras[0]); index++) {
-        root = fixture(VALID_ACTION, DEFAULT_ISSUED, DEFAULT_EXPIRES, extras[index]);
+        root = fixture(VALID_ACTION, extras[index]);
         assert(!mybot_device_command_parse(root, &result));
         mybot_json_delete(root);
     }
@@ -164,10 +157,26 @@ static void test_envelope(void) {
     assert(root != NULL && !mybot_device_command_parse(root, &result));
     mybot_json_delete(root);
 
-    static const char *const strings[] = {
-        "type", "schema", "message_id", "command_id", "conversation_id", "issued_at", "expires_at"};
+    static const char *const required[] = {"type",       "schema",          "version", "message_id",
+                                           "command_id", "conversation_id", "command"};
+    for (size_t index = 0; index < sizeof(required) / sizeof(required[0]); index++) {
+        root = fixture(VALID_ACTION, "");
+        mybot_json_t **link = &root->child;
+        while (*link && strcmp((*link)->string, required[index]) != 0) {
+            link = &(*link)->next;
+        }
+        assert(*link != NULL);
+        mybot_json_t *field = *link;
+        *link = field->next;
+        assert(!mybot_device_command_parse(root, &result));
+        *link = field;
+        mybot_json_delete(root);
+    }
+
+    static const char *const strings[] = {"type", "schema", "message_id", "command_id",
+                                          "conversation_id"};
     for (size_t index = 0; index < sizeof(strings) / sizeof(strings[0]); index++) {
-        root = fixture(VALID_ACTION, DEFAULT_ISSUED, DEFAULT_EXPIRES, "");
+        root = fixture(VALID_ACTION, "");
         mybot_json_t *field = mybot_json_get_object_item(root, strings[index]);
         assert(field != NULL);
         field->type = MYBOT_JSON_NULL;
@@ -179,7 +188,7 @@ static void test_envelope(void) {
     }
     static const double versions[] = {0, 2, 1.5, NAN, INFINITY};
     for (size_t index = 0; index < sizeof(versions) / sizeof(versions[0]); index++) {
-        root = fixture(VALID_ACTION, DEFAULT_ISSUED, DEFAULT_EXPIRES, "");
+        root = fixture(VALID_ACTION, "");
         mybot_json_t *version = mybot_json_get_object_item(root, "version");
         version->valuedouble = versions[index];
         assert(!mybot_device_command_parse(root, &result));
@@ -199,7 +208,7 @@ static void test_id_bounds(void) {
         for (size_t length = MYBOT_DEVICE_COMMAND_ID_CAPACITY - 1;
              length <= MYBOT_DEVICE_COMMAND_ID_CAPACITY; length++) {
             id[length] = '\0';
-            mybot_json_t *root = fixture(VALID_ACTION, DEFAULT_ISSUED, DEFAULT_EXPIRES, "");
+            mybot_json_t *root = fixture(VALID_ACTION, "");
             mybot_json_t *field = mybot_json_get_object_item(root, names[index]);
             char *original = field->valuestring;
             field->valuestring = id;
@@ -212,45 +221,34 @@ static void test_id_bounds(void) {
     }
 }
 
-static void test_timestamps(void) {
-    static const struct {
-        const char *issued;
-        const char *expires;
-        uint64_t expected;
-    } valid[] = {
-        {"1970-01-01T00:00:00Z", "1970-01-01T00:00:00.001Z", 0},
-        {"2000-02-29T00:00:00.001Z", "2000-03-01T00:00:00Z", UINT64_C(951782400001)},
-        {"2024-02-29T23:59:59.999Z", "2024-03-01T00:00:00Z", UINT64_C(1709251199999)},
-        {"2100-03-01T00:00:00Z", "2100-03-01T00:00:01Z", UINT64_C(4107542400000)},
-        {"9999-12-31T23:59:59.998Z", "9999-12-31T23:59:59.999Z", UINT64_C(253402300799998)},
+static void test_ignored_timestamps(void) {
+    static const char *const timestamps[] = {
+        "",
+        ",\"issued_at\":\"1970-01-01T00:00:00Z\",\"expires_at\":\"1970-01-01T00:00:01Z\"",
+        ",\"issued_at\":\"9999-12-31T23:59:58Z\",\"expires_at\":\"9999-12-31T23:59:59Z\"",
+        ",\"issued_at\":\"2026-09-21T10:00:10Z\",\"expires_at\":\"2026-09-21T10:00:00Z\"",
+        ",\"issued_at\":\"not a date\",\"expires_at\":\"\"",
+        ",\"issued_at\":null",
+        ",\"expires_at\":false",
+        ",\"issued_at\":123,\"expires_at\":{}",
+        ",\"issued_at\":[],\"expires_at\":true",
     };
     mybot_device_command_t command;
-    for (size_t index = 0; index < sizeof(valid) / sizeof(valid[0]); index++) {
-        mybot_json_t *root = fixture(VALID_ACTION, valid[index].issued, valid[index].expires, "");
+    for (size_t index = 0; index < sizeof(timestamps) / sizeof(timestamps[0]); index++) {
+        mybot_json_t *root = fixture(VALID_ACTION, timestamps[index]);
         assert(mybot_device_command_parse(root, &command));
-        assert(command.issued_at_ms == valid[index].expected);
+        assert(command.type == MYBOT_DEVICE_COMMAND_SET_VOLUME && command.params.volume == 50);
         mybot_json_delete(root);
     }
-    static const char *const invalid[] = {
-        "1969-12-31T23:59:59.999Z",  "2026-00-01T00:00:00Z",     "2026-13-01T00:00:00Z",
-        "2026-01-00T00:00:00Z",      "2026-01-32T00:00:00Z",     "2026-04-31T00:00:00Z",
-        "2026-02-29T00:00:00Z",      "2100-02-29T00:00:00Z",     "2026-01-01T24:00:00Z",
-        "2026-01-01T00:60:00Z",      "2026-01-01T00:00:60Z",     "2026-01-01T00:00:00.1Z",
-        "2026-01-01T00:00:00.1234Z", "2026-01-01T00:00:00.abcZ", "2026-01-01T00:00:00+00:00",
-        "2026-01-01t00:00:00Z",      "2026-01-01T00:00:00z",     "202x-01-01T00:00:00Z",
-        "2026-01-01T0x:00:00Z",      "2026-01-01T00:x0:00Z",     "2026-01-01T00:00:0xZ",
+    static const char *const repeated[] = {
+        ",\"issued_at\":null,\"issued_at\":null",
+        ",\"expires_at\":null,\"expires_at\":null",
     };
-    for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); index++) {
-        mybot_json_t *root = fixture(VALID_ACTION, invalid[index], "9999-12-31T23:59:59Z", "");
+    for (size_t index = 0; index < sizeof(repeated) / sizeof(repeated[0]); index++) {
+        mybot_json_t *root = fixture(VALID_ACTION, repeated[index]);
         assert(!mybot_device_command_parse(root, &command));
         mybot_json_delete(root);
     }
-    mybot_json_t *root = fixture(VALID_ACTION, DEFAULT_EXPIRES, DEFAULT_ISSUED, "");
-    assert(!mybot_device_command_parse(root, &command));
-    mybot_json_delete(root);
-    root = fixture(VALID_ACTION, DEFAULT_ISSUED, DEFAULT_ISSUED, "");
-    assert(!mybot_device_command_parse(root, &command));
-    mybot_json_delete(root);
 }
 
 int main(void) {
@@ -260,7 +258,7 @@ int main(void) {
     test_invalid_commands();
     test_envelope();
     test_id_bounds();
-    test_timestamps();
+    test_ignored_timestamps();
     aosl_dtor();
     puts("device_command_test: ok");
     return 0;
