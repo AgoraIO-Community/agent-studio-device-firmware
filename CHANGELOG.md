@@ -19,6 +19,8 @@ This project follows Semantic Versioning.
 
 ### Fixed
 
+- Use atomic GCC coverage counters to prevent corrupt branch counts during concurrent worker
+  and test execution.
 - Avoid overflow when combining JSON fractional scale with extreme negative exponents,
   reject non-finite or unrepresentable numbers before integer conversion, and preserve
   signed 64-bit integer values when printing JSON.
