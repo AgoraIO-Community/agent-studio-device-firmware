@@ -182,9 +182,6 @@ typedef struct {
             char uid_text[MYBOT_RTM_UID_MAX_LEN];
         } rtm_send_result;
         struct {
-            char text[AGORA_RTC_CHANNEL_NAME_MAX_LEN + 1];
-        } error;
-        struct {
             user_info_t user;
         } user;
         struct {
@@ -288,7 +285,7 @@ static void rtc_event_process(const aosl_ts_t *ts, aosl_refobj_t ref, uintptr_t 
         break;
 #endif
     case RTC_EVENT_ERROR:
-        process_error(e->conn_id, e->value, e->payload.error.text);
+        process_error(e->conn_id, e->value, (const char *)e->data);
         break;
     case RTC_EVENT_LICENSE:
         process_license_failed(e->conn_id, e->value);
@@ -554,8 +551,6 @@ static void process_rtm_event(const char *rtm_uid, rtm_event_type_e event_type,
 static void process_rtm_data(const char *rtm_uid, const void *data, size_t len,
                              rtm_message_type_e message_type, const char *custom_type,
                              uint32_t generation) {
-    size_t preview_len = len > 512U ? 512U : len;
-
     if (!s_rtc.rtm_login_requested) {
         AOSL_LOG_DBG(
             "[RTM] data ignored: login was not requested (from=%s, message_type=%s, type=%s, "
@@ -570,11 +565,10 @@ static void process_rtm_data(const char *rtm_uid, const void *data, size_t len,
         return;
     }
 
-    if (message_type == RTM_MESSAGE_TYPE_STRING && data && preview_len > 0) {
+    if (message_type == RTM_MESSAGE_TYPE_STRING && data && len > 0) {
         AOSL_LOG_DBG("[RTM] data received: from=%s message_type=%s type=%s len=%zu msg=%.*s",
                      rtm_uid ? rtm_uid : "(null)", rtm_message_type_name(message_type),
-                     custom_type ? custom_type : "(null)", len, (int)preview_len,
-                     (const char *)data);
+                     custom_type ? custom_type : "(null)", len, (int)len, (const char *)data);
     } else if (message_type == RTM_MESSAGE_TYPE_STRING) {
         AOSL_LOG_DBG("[RTM] data received: from=%s message_type=%s type=%s len=%zu msg=(empty)",
                      rtm_uid ? rtm_uid : "(null)", rtm_message_type_name(message_type),
@@ -638,8 +632,6 @@ static void process_rtm_subscribe_result(const char *channel, rtm_err_code_e err
 static void process_rtm_subscribe_data(const char *channel, const char *rtm_uid, const void *data,
                                        size_t len, rtm_message_type_e message_type,
                                        const char *custom_type, uint32_t generation) {
-    size_t preview_len = len > 512U ? 512U : len;
-
     if (!s_rtc.rtm_subscribed) {
         AOSL_LOG_DBG("[RTM] channel data ignored: no active subscription (channel=%s, from=%s, "
                      "len=%zu)",
@@ -661,12 +653,11 @@ static void process_rtm_subscribe_data(const char *channel, const char *rtm_uid,
         return;
     }
 
-    if (data && preview_len > 0) {
+    if (data && len > 0) {
         AOSL_LOG_DBG("[RTM] channel data received: channel=%s from=%s message_type=%s type=%s "
                      "len=%zu msg=%.*s",
                      channel, rtm_uid ? rtm_uid : "(null)", rtm_message_type_name(message_type),
-                     custom_type ? custom_type : "(null)", len, (int)preview_len,
-                     (const char *)data);
+                     custom_type ? custom_type : "(null)", len, (int)len, (const char *)data);
     } else {
         AOSL_LOG_DBG("[RTM] channel data received: channel=%s from=%s message_type=%s type=%s "
                      "len=%zu msg=(empty)",
@@ -1265,8 +1256,10 @@ static void on_error(connection_id_t c, int code, const char *m) {
     if (e) {
         e->conn_id = c;
         e->value = code;
-        if (m)
-            snprintf(e->payload.error.text, sizeof(e->payload.error.text), "%s", m);
+        if (m && !rtc_event_copy_data(e, m, strlen(m) + 1U)) {
+            rtc_event_free(e);
+            return;
+        }
         (void)rtc_event_queue(e);
     }
 }
