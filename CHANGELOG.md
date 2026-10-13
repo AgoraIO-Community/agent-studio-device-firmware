@@ -6,6 +6,10 @@ This project follows Semantic Versioning.
 
 ### Added
 
+- Document globally unique, stable product-generated device IDs using a chip prefix and the first
+  24 hexadecimal characters of a MAC HMAC-SHA256 digest, with a maximum length of 32 characters
+  and distinct chip prefixes isolating platform ID namespaces.
+- Document regional device-service addresses for mainland China and overseas deployments.
 - Handle cloud MCP DeviceCommand v1 messages through the existing RTM/control path with exact
   session checks and deduplication of the 16 most recently accepted command IDs. Reuse
   hardware/software playback volume control and add independent speaker mute without stopping
@@ -20,6 +24,12 @@ This project follows Semantic Versioning.
 
 ### Fixed
 
+- Assert non-null arguments before dereferencing device-service mock inputs so whole-tree
+  static analysis does not combine invalid-input tests with unchecked mocks in other test programs.
+- Move binding-status polling and single-attempt HTTPS stop notifications to a background service
+  worker so slow requests do not delay local hangup or a new conversation trigger. Keep lifecycle
+  state on the control worker, discard stale polling results, and drain background requests before
+  releasing runtime resources. HTTPS adapters must support two independent concurrent connections.
 - Remove the UTC clock dependency from MCP device commands. `issued_at` and `expires_at` are
   optional and currently ignored; a full command-ID cache replaces its oldest entry instead of
   rejecting new commands.

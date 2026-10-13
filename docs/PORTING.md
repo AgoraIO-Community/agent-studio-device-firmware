@@ -136,6 +136,13 @@ socket API; the SDK core does not link OpenSSL. The implementation must:
   peer close, and -1 on error or timeout;
 - release the entire TLS connection from `close`.
 
+Control requests and background device-service requests can use two connections concurrently.
+Give each `connect()` an independent context and support calls on different connections from
+different workers. The SDK uses each handle sequentially; it does not issue concurrent operations
+on the same connection. Include any shared TLS state in the adapter's thread-safety design.
+The Linux reference creates a separate SSL context, TLS session, and socket for each connection;
+verify the equivalent isolation in the target TLS implementation.
+
 Add the operations table to the platform descriptor. Do not disable certificate or hostname
 verification for development certificates; install the required CA in the device trust store.
 
@@ -340,8 +347,10 @@ while (mybot_is_running()) platform_sleep_ms(100);
 mybot_stop();
 ```
 
-Set `server_base` to an HTTPS URL and `device_id` to a non-empty identifier, keeping both fields
-NUL-terminated. `mybot_start()` sets up the SDK control worker and network listener; device services
+Choose `server_base` from the [regional device-service addresses](../README.md#device-service-addresses),
+including `/api` without a trailing slash. Generate `device_id` in the product layer according to
+[Device ID generation](#device-id-generation), keeping both fields NUL-terminated.
+`mybot_start()` sets up the SDK control worker and network listener; device services
 start after the listener's first connected event. The historical `MYBOT_STATE_WIFI_PROVISIONING` and
 `MYBOT_LCD_SCREEN_WIFI_PROVISIONING` names identify this initial network-confirmation stage;
 they do not mean the SDK is running provisioning. Do not call stop from a platform callback
@@ -372,18 +381,64 @@ Re-pairing also discards pending conversation-start requests, including requests
 the pair request but before the next control tick. Once the new binding is claimed, starting a
 conversation requires a fresh trigger, even if the pair-code request needed retries.
 
+The application control worker owns lifecycle state, keys, LCD, RTC, and media operations. A separate
+`service_mpq` performs pairing/runtime binding-status polling and HTTPS stop notifications, then
+returns polling results to the control worker. At most one poll is outstanding, so slow responses
+do not accumulate polling requests. Each request owns a snapshot of its address and credentials;
+the control worker discards results from an earlier network or binding generation.
+
 Conversation teardown first stops local video and RTC, then flushes session PCM. An online hangup
-returns to `MYBOT_STATE_READY` before sending one HTTPS stop notification with the original reason.
-The notification is not retried on failure; the compatible device service also ends the remote
-conversation when the device leaves the RTC channel. HTTPS still runs synchronously on the control
-worker: local audio and LCD cleanup do not wait for its response, but later control work may wait
-until the request completes or times out. Offline conversations end locally without an HTTPS stop
-notification.
+returns to `MYBOT_STATE_READY` before queuing one HTTPS stop notification with the original reason.
+The control worker does not wait for this notification, so a slow background poll or stop request
+does not delay the next conversation trigger. The notification is not retried on failure; the
+compatible device service also ends the remote conversation when the device leaves the RTC
+channel. Offline conversations end locally without an HTTPS stop notification.
+
+Pair-code, conversation-start, and RTC-token renewal requests still run synchronously on the control
+worker, as do the RTM login/subscription waits described below. Their own latency can delay later
+control work. Shutdown stops accepting background work and results and waits for `service_mpq`
+before releasing request state and the AOSL reference; an in-flight HTTPS request can still delay
+`mybot_stop()`. There is no transport cancellation API.
 
 Re-pairing uses the same local-first teardown before clearing the device credential and requesting
-a new pair code. Pending stop and RTC-token renewal requests for the old conversation are cleared.
+a new pair code. Pending lifecycle stop and RTC-token renewal flags for the old conversation are
+cleared; an already queued HTTPS stop notification retains its original credential snapshot.
 A rejected device credential still restarts pairing; pair-code and RTC-token renewal retries are
 unaffected by the single-attempt stop policy.
+
+### Device ID generation
+
+`mybot_config_t.device_id` is the globally unique identity of one physical device. Different
+devices must have different IDs, and a device must retain its ID across reboots and OTA updates.
+The product supplies this ID; the SDK does not read the MAC or derive it.
+Use `<chip>-<24 uppercase hexadecimal characters>`.
+
+The chip prefix separates ID namespaces across chip platforms. Assign each platform a distinct,
+fixed prefix, such as `ESP32`, `BK7258`, or `BK7259`; different platforms must not share a prefix.
+Even when their MAC addresses or digest suffixes match, the complete IDs remain different.
+
+Generate the ID as follows:
+
+1. Select the device's stable MAC address as the original six bytes, not a formatted string.
+   The ESP32 reference reads the Wi-Fi station MAC with `ESP_MAC_WIFI_STA`.
+2. Compute HMAC-SHA256 using a fixed platform derivation key. The ESP32 reference uses the
+   ASCII key `mybot-esp32-device-id-v1`, without its terminating NUL.
+3. Take the first 12 digest bytes and encode them as 24 uppercase hexadecimal characters.
+   The limit is 24 hexadecimal characters, not 24 bits or 24 bytes.
+4. Add the chip prefix and one `-`. Keep the prefix at most 7 ASCII characters, so the complete
+   ID is at most 32 characters, excluding NUL. A separate output buffer must hold at least
+   33 bytes, and generation must fail rather than truncate the result.
+
+For example, the six MAC bytes `02 00 00 12 34 56`, the ESP32 key above, and the prefix `ESP32`
+produce `ESP32-BF0C5C8DD323ED321F928C79`. The reference implementation is
+[build_device_id() at revision 3aa7d41](https://github.com/junlon2006/mybot-esp32/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35).
+Keep the prefix, derivation key, and MAC source unchanged across reboots and OTA updates to
+preserve device identity. The compiled derivation key is not an authentication credential.
+Within a chip namespace, the truncated digest is not a proof of collision-free uniqueness.
+The product and device registration system must check global uniqueness and reject conflicting registrations;
+the example ID must be replaced with the actual device's ID before deployment.
+The existing SDK buffer remains `device_id[64]`; its startup validation checks non-empty,
+NUL-terminated input and does not enforce this product-side 32-character generation rule.
 
 ### RTM account mapping
 
@@ -394,7 +449,7 @@ and the local RTM UID. RTM token authentication uses a separate RTM credential; 
 service response exposes `rtc.token`, so deployments must confirm that the service/app
 authentication mode accepts it for RTM or provide an RTM token through an extended service
 contract. The `agent_uid` value is the peer passed to `mybot_agora_rtc_send_rtm_data()`; the
-`AG-*` device ID is only the device-service identity and must not be substituted for either
+device ID is only the device-service identity and must not be substituted for either
 account.
 
 An RTM UID must be non-empty, shorter than 64 bytes, and contain only ASCII letters, digits, space,
@@ -475,6 +530,8 @@ host must ensure its include and library paths refer to that package.
 
 - Public headers compile with warnings as errors and the host links only documented targets.
 - HTTPS rejects an untrusted CA, expired certificate, wrong hostname, missing SNI and handshake timeout.
+- Independent HTTPS connections work concurrently across control and background workers; a delayed
+  binding-status poll or stop notification does not delay local hangup or a new start request.
 - An already-connected network is reported when the SDK listener attaches; runtime disconnect,
   reconnect, and failure events complete without deadlock.
 - Entering provisioning waits for `mybot_stop()` to finish; the product restarts MyBot only after

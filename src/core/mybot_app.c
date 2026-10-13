@@ -29,6 +29,7 @@
 
 #define STATE_TICK_MS 100
 #define CONTROL_MPQ_STACK_SIZE 16384
+#define SERVICE_MPQ_STACK_SIZE 16384
 #define VOLUME_KEY_STEP 10
 #define RTM_MESSAGE_MAX_BYTES 1024U
 #define COMMAND_HISTORY_SIZE 16U
@@ -64,6 +65,8 @@ typedef struct {
     /* Sole owner of application state transitions and control resources. */
     aosl_mpq_t control_mpq;
     aosl_timer_t control_timer;
+    aosl_mpq_t service_mpq;
+    aosl_atomic_t service_results_enabled;
     bool lifecycle_initialized;
     int control_start_result;
 } mybot_runtime_t;
@@ -385,6 +388,89 @@ static void handle_start_conversation(const aosl_ts_t *queued_ts, aosl_refobj_t 
 static void fail_control_queue(mybot_runtime_t *runtime, const char *event) {
     AOSL_LOG_ERR("failed to queue control event: %s", event);
     runtime_publish_exit(runtime);
+}
+
+static void handle_service_result(const aosl_ts_t *ts, aosl_refobj_t ref, uintptr_t argc,
+                                  uintptr_t argv[]) {
+    (void)ts;
+    (void)ref;
+    if (argc != 2) {
+        return;
+    }
+    mybot_runtime_t *runtime = (mybot_runtime_t *)argv[0];
+    mybot_device_service_request_t *request = (mybot_device_service_request_t *)argv[1];
+    if (runtime_is_running(runtime) && runtime->lifecycle_initialized) {
+        mybot_device_lifecycle_service_result(&runtime->lifecycle, request);
+    }
+    aosl_hal_free(request);
+}
+
+/* This worker only uses the request snapshot, never mutable lifecycle fields. */
+static void execute_service_request(const aosl_ts_t *ts, aosl_refobj_t ref, uintptr_t argc,
+                                    uintptr_t argv[]) {
+    (void)ts;
+    (void)ref;
+    if (argc != 2) {
+        return;
+    }
+    mybot_runtime_t *runtime = (mybot_runtime_t *)argv[0];
+    mybot_device_service_request_t *request = (mybot_device_service_request_t *)argv[1];
+    if (request->type != MYBOT_DEVICE_SERVICE_STOP &&
+        !aosl_atomic_read(&runtime->service_results_enabled)) {
+        aosl_hal_free(request);
+        return;
+    }
+
+    if (request->type == MYBOT_DEVICE_SERVICE_STOP) {
+        request->result = mybot_device_client_stop_conversation(
+            request->server_base, request->device_id, request->credential,
+            request->payload.stop.conversation_id, request->payload.stop.reason);
+    } else {
+        char auth[MYBOT_DEVICE_CLIENT_MAX_TOKEN + 16];
+        int written = snprintf(auth, sizeof(auth), "%s %s",
+                               request->type == MYBOT_DEVICE_SERVICE_PAIR_POLL ? "Pair" : "Device",
+                               request->credential);
+        request->result =
+            written < 0 || (size_t)written >= sizeof(auth)
+                ? -1
+                : mybot_device_client_get_binding_status(request->server_base, request->device_id,
+                                                         auth, &request->payload.binding);
+    }
+
+    if (!aosl_atomic_read(&runtime->service_results_enabled) || !runtime_is_running(runtime)) {
+        aosl_hal_free(request);
+        return;
+    }
+    if (aosl_mpq_queue(runtime->control_mpq, AOSL_MPQ_INVALID, AOSL_REF_INVALID,
+                       "handle_service_result", handle_service_result, 2, (uintptr_t)runtime,
+                       (uintptr_t)request) < 0) {
+        aosl_hal_free(request);
+        fail_control_queue(runtime, "service result");
+    }
+}
+
+static int submit_service_request(mybot_device_service_request_t *request, void *user_data) {
+    mybot_runtime_t *runtime = user_data;
+    if (aosl_mpq_invalid(runtime->service_mpq) ||
+        !aosl_atomic_read(&runtime->service_results_enabled)) {
+        return -1;
+    }
+    return aosl_mpq_queue(runtime->service_mpq, AOSL_MPQ_INVALID, AOSL_REF_INVALID,
+                          "execute_service_request", execute_service_request, 2, (uintptr_t)runtime,
+                          (uintptr_t)request);
+}
+
+static bool destroy_service_queue(mybot_runtime_t *runtime) {
+    aosl_atomic_set(&runtime->service_results_enabled, false);
+    if (aosl_mpq_invalid(runtime->service_mpq)) {
+        return true;
+    }
+    if (aosl_mpq_destroy_wait(runtime->service_mpq) < 0) {
+        AOSL_LOG_ERR("failed to destroy background service queue");
+        return false;
+    }
+    runtime->service_mpq = AOSL_MPQ_INVALID;
+    return true;
 }
 
 static void sync_wake_words(mybot_runtime_t *runtime) {
@@ -799,6 +885,7 @@ static void cleanup_services(mybot_runtime_t *runtime) {
         mybot_device_lifecycle_shutdown(&runtime->lifecycle);
         runtime->lifecycle_initialized = false;
     }
+    (void)destroy_service_queue(runtime);
     mybot_kv_store_deinit(&runtime->kv_store);
 }
 
@@ -825,6 +912,15 @@ static int start_services(mybot_runtime_t *runtime) {
     }
 #endif
 
+    runtime->service_mpq = aosl_mpq_create_flags(AOSL_MPQ_FLAG_SIGP_EVENT | AOSL_MPQ_FLAG_NONBLOCK,
+                                                 AOSL_THRD_PRI_NORMAL, SERVICE_MPQ_STACK_SIZE, 1000,
+                                                 "service_mpq", NULL, NULL, NULL);
+    if (aosl_mpq_invalid(runtime->service_mpq)) {
+        AOSL_LOG_ERR("failed to create background service queue");
+        goto fail;
+    }
+    aosl_atomic_set(&runtime->service_results_enabled, true);
+
     mybot_device_lifecycle_callbacks_t lifecycle_cbs;
     memset(&lifecycle_cbs, 0, sizeof(lifecycle_cbs));
     lifecycle_cbs.on_pair_code = dev_on_pair_code;
@@ -832,6 +928,7 @@ static int start_services(mybot_runtime_t *runtime) {
     lifecycle_cbs.on_conversation_stop = dev_on_conversation_stop;
     lifecycle_cbs.on_rtc_token_renewed = dev_on_rtc_token_renewed;
     lifecycle_cbs.on_state_changed = dev_on_state_changed;
+    lifecycle_cbs.submit_service_request = submit_service_request;
     lifecycle_cbs.user_data = runtime;
     if (mybot_device_lifecycle_init(&runtime->lifecycle, &runtime->kv_store,
                                     runtime->config.server_base, runtime->config.device_id,
@@ -1142,15 +1239,15 @@ static void control_worker_fini(void *arg) {
 }
 
 static bool destroy_control_queue(mybot_runtime_t *runtime) {
-    if (aosl_mpq_invalid(runtime->control_mpq)) {
-        return true;
+    if (!aosl_mpq_invalid(runtime->control_mpq)) {
+        if (aosl_mpq_destroy_wait(runtime->control_mpq) < 0) {
+            AOSL_LOG_ERR("failed to destroy application control queue");
+            return false;
+        }
+        runtime->control_mpq = AOSL_MPQ_INVALID;
     }
-    if (aosl_mpq_destroy_wait(runtime->control_mpq) < 0) {
-        AOSL_LOG_ERR("failed to destroy application control queue");
-        return false;
-    }
-    runtime->control_mpq = AOSL_MPQ_INVALID;
-    return true;
+    /* Retain AOSL ownership until a failed background teardown can be retried. */
+    return destroy_service_queue(runtime);
 }
 
 int mybot_start(const mybot_config_t *cfg) {
@@ -1177,6 +1274,8 @@ int mybot_start(const mybot_config_t *cfg) {
     memcpy(&runtime->config, cfg, sizeof(runtime->config));
     runtime->control_mpq = AOSL_MPQ_INVALID;
     runtime->control_timer = AOSL_MPQ_TIMER_INVALID;
+    runtime->service_mpq = AOSL_MPQ_INVALID;
+    aosl_atomic_set(&runtime->service_results_enabled, false);
     runtime->control_start_result = -1;
 
     aosl_ctor();
