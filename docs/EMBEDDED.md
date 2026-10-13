@@ -149,7 +149,10 @@ power and timing measurements; enabling it does not itself stop the playback or 
 - RTSA is initialized with `RTC_LOG_ERROR`. Its initialization changes global AOSL logging, so
   the adapter saves and restores the AOSL level on both success and failure.
 - Routine RTM message/forwarding logs use `AOSL_LOG_DBG`; failures remain visible at warning/error
-  levels. Measure log formatting and transport cost when enabling DEBUG, especially for payloads.
+  levels. RTM string payloads and RTC error text are passed to logging in full. Measure log
+  formatting and transport cost when enabling DEBUG, especially for payloads. Check the target
+  logging backend as well: the bundled BK725x AOSL HAL has a 512-byte formatting buffer, while
+  the Linux HAL prints directly.
 - Pairing codes currently appear at NOTICE in the core and announcement logs. Account for that
   output in production log handling; do not add device tokens or other credentials to logs.
 

@@ -53,6 +53,7 @@ This project follows Semantic Versioning.
 
 ### Changed
 
+- Log complete RTM string messages and RTC error text without SDK-side preview limits.
 - Reuse consumer-owned PCM buffers during session flush, removing temporary drain allocations.
 - Increase the RTC queue capacity from 64 to 1000 pending calls while retaining nonblocking
   submission and the existing event handling.
