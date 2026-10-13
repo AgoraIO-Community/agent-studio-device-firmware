@@ -488,10 +488,13 @@ static void service_request_entered(bool *entered, const bool *blocked) {
 
 int mybot_device_client_get_binding_status(const char *base_url, const char *device_id,
                                            const char *auth_header, mybot_device_binding_t *resp) {
+    assert(base_url != NULL);
+    assert(device_id != NULL);
+    assert(auth_header != NULL);
+    assert(resp != NULL);
     assert(strcmp(base_url, TEST_SERVER_BASE) == 0);
     assert(strcmp(device_id, "device-1") == 0);
     assert(strcmp(auth_header, "Device device-service-token") == 0);
-    assert(resp != NULL);
     service_request_entered(&s_service_poll_entered, &s_block_service_poll);
     memset(resp, 0, sizeof(*resp));
     snprintf(resp->status, sizeof(resp->status), "%s", "bound");
@@ -505,6 +508,11 @@ int mybot_device_client_get_binding_status(const char *base_url, const char *dev
 int mybot_device_client_stop_conversation(const char *base_url, const char *device_id,
                                           const char *device_token, const char *conversation_id,
                                           const char *reason) {
+    assert(base_url != NULL);
+    assert(device_id != NULL);
+    assert(device_token != NULL);
+    assert(conversation_id != NULL);
+    assert(reason != NULL);
     assert(strcmp(base_url, TEST_SERVER_BASE) == 0);
     assert(strcmp(device_id, "device-1") == 0);
     assert(strcmp(device_token, "device-service-token") == 0);

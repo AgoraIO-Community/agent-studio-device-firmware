@@ -305,8 +305,9 @@ mybot_stop();
 ```
 
 从 [README 的设备服务地址](../README.zh-CN.md#设备服务地址)中选择 `server_base`，
-保留 `/api` 且末尾不带 `/`。将 `device_id` 设置为非空标识符，并保证两个字段均以
-NUL 结尾。`mybot_start()` 建立 SDK 控制线程与网络监听，首次收到已连接事件后才启动设备服务。
+保留 `/api` 且末尾不带 `/`。产品层按[设备 ID 生成](#设备-id-生成)规则生成 `device_id`，
+并保证两个字段均以 NUL 结尾。`mybot_start()` 建立 SDK 控制线程与网络监听，
+首次收到已连接事件后才启动设备服务。
 历史名称
 `MYBOT_STATE_WIFI_PROVISIONING` 与 `MYBOT_LCD_SCREEN_WIFI_PROVISIONING` 表示等待初次网络
 可用确认，不表示 SDK 正在执行配网。不要从平台回调中调用 stop，因为它会等待工作线程与
@@ -352,6 +353,37 @@ RTSA 生命周期通过 `agora_rtc_init()` / `agora_rtc_fini()` 管理。宿主�
 设备凭据被拒绝时仍重新进入配对流程；配对码申请
 和 RTC token 续期的重试不受停止通知仅发送一次的策略影响。
 
+### 设备 ID 生成
+
+`mybot_config_t.device_id` 是物理设备的全局唯一标识：不同设备使用不同 ID，同一设备在
+重启和 OTA 后保持 ID 不变。产品层提供该 ID；SDK 不读取 MAC，也不负责派生 ID。
+采用 `<芯片型号>-<24 个大写十六进制字符>`。
+
+芯片型号前缀用于完全隔离不同芯片平台的 ID 命名空间。各平台使用不同且固定的前缀，
+例如 `ESP32`、`BK7258`、`BK7259`，禁止不同平台复用同一前缀。即使 MAC 地址或摘要后缀
+相同，完整设备 ID 也不会重复。
+
+生成步骤如下：
+
+1. 选择设备稳定 MAC 地址，使用原始 6 字节，不使用格式化字符串。
+   ESP32 参考实现通过 `ESP_MAC_WIFI_STA` 读取 Wi-Fi STA MAC。
+2. 使用固定的平台派生 key 计算 HMAC-SHA256。ESP32 参考实现的 ASCII key 为
+   `mybot-esp32-device-id-v1`，不包含结尾 NUL。
+3. 取摘要前 12 字节，编码成 24 个大写十六进制字符。
+   这里的 24 位指十六进制字符数量，不是 24 bit 或 24 字节。
+4. 拼接芯片型号前缀和一个 `-`。前缀最多 7 个 ASCII 字符，完整 ID 最多 32 字符，
+   不含结尾 NUL。独立输出缓冲区至少 33 字节；生成失败时应返回错误，不能截断。
+
+例如，MAC 原始字节 `02 00 00 12 34 56`、上述 ESP32 key 和前缀 `ESP32`
+生成 `ESP32-BF0C5C8DD323ED321F928C79`。参考源码见
+[3aa7d41 版本的 build_device_id()](https://github.com/junlon2006/mybot-esp32/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35)。
+重启和 OTA 后应保持前缀、派生 key 及 MAC 来源不变，保证设备身份稳定。
+编译进固件的派生 key 不是认证凭据。
+同一芯片命名空间内，截断摘要不是绝对无碰撞的证明。产品和设备注册系统须检查全局唯一性，
+拒绝冲突注册；正式部署前应将示例 ID 替换为实际设备的 ID。
+SDK 现有缓冲区仍为 `device_id[64]`；启动校验检查非空和 NUL 结尾，
+并未强制校验这条产品侧的 32 字符生成规则。
+
 ### RTM 账号映射
 
 Agora RTM 集成遵循 xiaozhi 参考流程。设备服务的启动会话响应提供服务端生成的
@@ -359,7 +391,7 @@ Agora RTM 集成遵循 xiaozhi 参考流程。设备服务的启动会话响应�
 `rtc.uid` 作为 RTC user account 和本地 RTM UID。启用 RTM token 鉴权时应使用独立的 RTM
 凭据；当前服务响应只提供 `rtc.token`，部署方必须确认服务端/项目鉴权模式允许该 token
 用于 RTM，或扩展服务协议下发 RTM token。`agent_uid` 是传给
-`mybot_agora_rtc_send_rtm_data()` 的对端 UID；`AG-*` 设备 ID 仅用于设备服务身份，不能替代
+`mybot_agora_rtc_send_rtm_data()` 的对端 UID；设备 ID 仅用于设备服务身份，不能替代
 这两个账号。
 
 RTM UID 必须非空、长度小于 64 字节，并且只能包含 Agora 接受的 ASCII 字母、数字、空格和

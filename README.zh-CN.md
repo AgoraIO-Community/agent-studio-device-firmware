@@ -130,15 +130,25 @@ ctest --test-dir build --output-on-failure
 | 国内 | `https://botstation.shengwang.cn/api` |
 | 海外 | `https://botstation.agora.io/api` |
 
+`device_id` 是物理设备的全局唯一、稳定的设备唯一码。产品和设备注册系统须保证一个 ID
+仅对应一台设备。不同芯片平台使用不同且固定的型号前缀，完全隔离 ID 命名空间；即使摘要
+后缀相同，跨平台的完整 ID 也不同。
+产品层按 `<芯片型号>-<24 个大写十六进制字符>` 生成该 ID：使用固定的平台派生 key，
+对设备稳定 MAC 地址计算 HMAC-SHA256，取摘要前 12 字节。芯片型号前缀最多 7 个 ASCII 字符，
+完整 ID 最多 32 字符，不含结尾 NUL。输入与 key 的约定见
+[设备 ID 生成](docs/PORTING.zh-CN.md#设备-id-生成)。SDK 接收该 ID，不负责生成。
+
 使用国内服务运行示例：
 
 ```bash
 ./build/examples/linux/mybot \
   --server https://botstation.shengwang.cn/api \
-  --device-id AG-DEMO-001 \
+  --device-id ESP32-BF0C5C8DD323ED321F928C79 \
   --fw-ver 1.2.0 \
   --hw-model linux-reference
 ```
+
+请将示例 ID 替换为当前设备实际生成的 ID。
 
 示例程序还会在拿到配对码时可选地播报语音提示（“请在控制台输入配对码…”），音频来自
 `./assets/locales/<locale>/`（原始 16 kHz 单声道 16-bit PCM：`prompt.pcm`、`0.pcm`~`9.pcm`）。

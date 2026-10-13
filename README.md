@@ -156,15 +156,27 @@ Choose the base URL for the device's region. Pass it through `--server` in the L
 | Mainland China | `https://botstation.shengwang.cn/api` |
 | Overseas | `https://botstation.agora.io/api` |
 
+`device_id` is the globally unique, stable identity of one physical device. Product and device
+registration systems must ensure that each ID belongs to exactly one device.
+Each chip platform uses a distinct, fixed chip prefix to isolate its ID namespace, so identical
+digest suffixes on different platforms still produce different complete IDs.
+The product generates it as `<chip>-<24 uppercase hex characters>`: use the first
+12 bytes of HMAC-SHA256 over its stable MAC address, with a fixed platform derivation key.
+The chip prefix is at most 7 ASCII characters, so the complete ID is at most 32 characters,
+excluding the terminating NUL. See [Device ID generation](docs/PORTING.md#device-id-generation)
+for the input and key rules. The SDK receives this ID; it does not generate it.
+
 Run the example with the overseas service:
 
 ```bash
 ./build/examples/linux/mybot \
   --server https://botstation.agora.io/api \
-  --device-id AG-DEMO-001 \
+  --device-id ESP32-BF0C5C8DD323ED321F928C79 \
   --fw-ver 1.2.0 \
   --hw-model linux-reference
 ```
+
+Replace the sample ID with the ID generated for your device.
 
 The example also plays an optional pairing-code voice prompt ("Please enter the pairing code in the console...") from
 `./assets/locales/<locale>/` (raw 16 kHz mono s16 PCM: `prompt.pcm`, `0.pcm`..`9.pcm`).

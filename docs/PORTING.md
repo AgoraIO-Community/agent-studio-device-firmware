@@ -348,8 +348,9 @@ mybot_stop();
 ```
 
 Choose `server_base` from the [regional device-service addresses](../README.md#device-service-addresses),
-including `/api` without a trailing slash. Set `device_id` to a non-empty identifier, keeping both fields
-NUL-terminated. `mybot_start()` sets up the SDK control worker and network listener; device services
+including `/api` without a trailing slash. Generate `device_id` in the product layer according to
+[Device ID generation](#device-id-generation), keeping both fields NUL-terminated.
+`mybot_start()` sets up the SDK control worker and network listener; device services
 start after the listener's first connected event. The historical `MYBOT_STATE_WIFI_PROVISIONING` and
 `MYBOT_LCD_SCREEN_WIFI_PROVISIONING` names identify this initial network-confirmation stage;
 they do not mean the SDK is running provisioning. Do not call stop from a platform callback
@@ -405,6 +406,40 @@ cleared; an already queued HTTPS stop notification retains its original credenti
 A rejected device credential still restarts pairing; pair-code and RTC-token renewal retries are
 unaffected by the single-attempt stop policy.
 
+### Device ID generation
+
+`mybot_config_t.device_id` is the globally unique identity of one physical device. Different
+devices must have different IDs, and a device must retain its ID across reboots and OTA updates.
+The product supplies this ID; the SDK does not read the MAC or derive it.
+Use `<chip>-<24 uppercase hexadecimal characters>`.
+
+The chip prefix separates ID namespaces across chip platforms. Assign each platform a distinct,
+fixed prefix, such as `ESP32`, `BK7258`, or `BK7259`; different platforms must not share a prefix.
+Even when their MAC addresses or digest suffixes match, the complete IDs remain different.
+
+Generate the ID as follows:
+
+1. Select the device's stable MAC address as the original six bytes, not a formatted string.
+   The ESP32 reference reads the Wi-Fi station MAC with `ESP_MAC_WIFI_STA`.
+2. Compute HMAC-SHA256 using a fixed platform derivation key. The ESP32 reference uses the
+   ASCII key `mybot-esp32-device-id-v1`, without its terminating NUL.
+3. Take the first 12 digest bytes and encode them as 24 uppercase hexadecimal characters.
+   The limit is 24 hexadecimal characters, not 24 bits or 24 bytes.
+4. Add the chip prefix and one `-`. Keep the prefix at most 7 ASCII characters, so the complete
+   ID is at most 32 characters, excluding NUL. A separate output buffer must hold at least
+   33 bytes, and generation must fail rather than truncate the result.
+
+For example, the six MAC bytes `02 00 00 12 34 56`, the ESP32 key above, and the prefix `ESP32`
+produce `ESP32-BF0C5C8DD323ED321F928C79`. The reference implementation is
+[build_device_id() at revision 3aa7d41](https://github.com/junlon2006/mybot-esp32/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35).
+Keep the prefix, derivation key, and MAC source unchanged across reboots and OTA updates to
+preserve device identity. The compiled derivation key is not an authentication credential.
+Within a chip namespace, the truncated digest is not a proof of collision-free uniqueness.
+The product and device registration system must check global uniqueness and reject conflicting registrations;
+the example ID must be replaced with the actual device's ID before deployment.
+The existing SDK buffer remains `device_id[64]`; its startup validation checks non-empty,
+NUL-terminated input and does not enforce this product-side 32-character generation rule.
+
 ### RTM account mapping
 
 The Agora RTM integration follows the xiaozhi reference flow. The device-service conversation
@@ -414,7 +449,7 @@ and the local RTM UID. RTM token authentication uses a separate RTM credential; 
 service response exposes `rtc.token`, so deployments must confirm that the service/app
 authentication mode accepts it for RTM or provide an RTM token through an extended service
 contract. The `agent_uid` value is the peer passed to `mybot_agora_rtc_send_rtm_data()`; the
-`AG-*` device ID is only the device-service identity and must not be substituted for either
+device ID is only the device-service identity and must not be substituted for either
 account.
 
 An RTM UID must be non-empty, shorter than 64 bytes, and contain only ASCII letters, digits, space,
