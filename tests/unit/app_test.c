@@ -23,6 +23,7 @@
 #include <api/aosl.h>
 #include <api/aosl_log.h>
 #include <api/aosl_mpq.h>
+#include <hal/aosl_hal_memory.h>
 #include <hal/aosl_hal_time.h>
 
 #include <assert.h>
@@ -74,6 +75,19 @@ static bool s_device_stop_requested;
 static bool s_device_pair_requested;
 static bool s_device_token_renewal_requested;
 static bool s_device_network_available = true;
+static bool s_service_poll_requested;
+static bool s_block_service_poll;
+static bool s_service_poll_entered;
+static bool s_block_service_stop;
+static bool s_service_stop_entered;
+static int s_service_poll_calls;
+static int s_service_stop_calls;
+static int s_service_stop_result;
+static int s_service_result_calls;
+static bool s_track_service_thread;
+static bool s_service_thread_valid;
+static pthread_t s_service_thread;
+static aosl_mpq_t s_test_service_mpq = AOSL_MPQ_INVALID;
 static bool s_block_device_tick;
 static bool s_device_tick_entered;
 static bool s_rtc_flood_returned;
@@ -106,9 +120,14 @@ static int s_service_failure;
 static bool s_control_create_fails;
 static bool s_control_call_fails;
 static bool s_control_destroy_fails;
+static bool s_service_create_fails;
+static bool s_service_destroy_fails;
 static const char *s_media_create_failure;
 static aosl_mpq_t s_wrapped_control_mpq = AOSL_MPQ_INVALID;
+static aosl_mpq_t s_wrapped_service_mpq = AOSL_MPQ_INVALID;
 static int s_control_destroy_failures;
+static int s_service_destroy_failures;
+static int s_service_destroy_calls;
 #endif
 
 static mybot_agora_rtc_callbacks_t s_rtc_callbacks;
@@ -315,7 +334,11 @@ aosl_mpq_t __wrap_aosl_mpq_create_flags(int flags, int pri, int stack_size, int 
                                         const char *name, aosl_mpq_init_t init,
                                         aosl_mpq_fini_t fini, void *arg) {
     bool control = name && strcmp(name, "control_mpq") == 0;
+    bool service = name && strcmp(name, "service_mpq") == 0;
     if (control && s_control_create_fails) {
+        return AOSL_MPQ_INVALID;
+    }
+    if (service && s_service_create_fails) {
         return AOSL_MPQ_INVALID;
     }
     if (s_media_create_failure && name && strcmp(name, s_media_create_failure) == 0) {
@@ -325,6 +348,9 @@ aosl_mpq_t __wrap_aosl_mpq_create_flags(int flags, int pri, int stack_size, int 
         __real_aosl_mpq_create_flags(flags, pri, stack_size, max, name, init, fini, arg);
     if (control) {
         s_wrapped_control_mpq = mpq;
+    }
+    if (service) {
+        s_wrapped_service_mpq = mpq;
     }
     return mpq;
 }
@@ -345,6 +371,19 @@ int __wrap_aosl_mpq_destroy_wait(aosl_mpq_t mpq) {
     if (mpq == s_wrapped_control_mpq && s_control_destroy_fails) {
         s_control_destroy_failures++;
         return -1;
+    }
+    if (mpq == s_wrapped_service_mpq) {
+        mock_lock();
+        s_service_destroy_calls++;
+        assert(pthread_cond_broadcast(&s_io_cond) == 0);
+        bool fails = s_service_destroy_fails;
+        if (fails) {
+            s_service_destroy_failures++;
+        }
+        mock_unlock();
+        if (fails) {
+            return -1;
+        }
     }
     return __real_aosl_mpq_destroy_wait(mpq);
 }
@@ -409,6 +448,76 @@ static bool wait_for_flag(const bool *flag, int timeout_ms) {
         aosl_hal_msleep(1);
     }
     return false;
+}
+
+static void wait_for_service_flag(const bool *flag) {
+    struct timespec deadline;
+    assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_sec += 3;
+    mock_lock();
+    while (!*flag) {
+        assert(pthread_cond_timedwait(&s_io_cond, &s_lock, &deadline) == 0);
+    }
+    mock_unlock();
+}
+
+static void service_request_entered(bool *entered, const bool *blocked) {
+    assert(!aosl_mpq_invalid(aosl_mpq_this()));
+    mock_lock();
+    s_test_service_mpq = aosl_mpq_this();
+    if (s_track_service_thread) {
+        assert(s_control_thread_valid);
+        assert(!pthread_equal(s_control_thread, pthread_self()));
+        if (s_service_thread_valid) {
+            assert(pthread_equal(s_service_thread, pthread_self()));
+        } else {
+            s_service_thread = pthread_self();
+            s_service_thread_valid = true;
+        }
+    }
+    *entered = true;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    struct timespec deadline;
+    assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_sec += 5;
+    while (*blocked) {
+        assert(pthread_cond_timedwait(&s_io_cond, &s_lock, &deadline) == 0);
+    }
+    mock_unlock();
+}
+
+int mybot_device_client_get_binding_status(const char *base_url, const char *device_id,
+                                           const char *auth_header, mybot_device_binding_t *resp) {
+    assert(strcmp(base_url, TEST_SERVER_BASE) == 0);
+    assert(strcmp(device_id, "device-1") == 0);
+    assert(strcmp(auth_header, "Device device-service-token") == 0);
+    assert(resp != NULL);
+    service_request_entered(&s_service_poll_entered, &s_block_service_poll);
+    memset(resp, 0, sizeof(*resp));
+    snprintf(resp->status, sizeof(resp->status), "%s", "bound");
+    mock_lock();
+    s_service_poll_calls++;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    return 0;
+}
+
+int mybot_device_client_stop_conversation(const char *base_url, const char *device_id,
+                                          const char *device_token, const char *conversation_id,
+                                          const char *reason) {
+    assert(strcmp(base_url, TEST_SERVER_BASE) == 0);
+    assert(strcmp(device_id, "device-1") == 0);
+    assert(strcmp(device_token, "device-service-token") == 0);
+    assert(strcmp(conversation_id, "conversation-1") == 0);
+    assert(strcmp(reason, MYBOT_CONVERSATION_STOP_REASON_USER_REQUESTED) == 0 ||
+           strcmp(reason, MYBOT_CONVERSATION_STOP_REASON_DEVICE_HANGUP) == 0);
+    service_request_entered(&s_service_stop_entered, &s_block_service_stop);
+    mock_lock();
+    s_service_stop_calls++;
+    int result = s_service_stop_result;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    return result;
 }
 
 static void wait_for_io_stop(bool *block_requested, bool *blocked, bool *started, bool *timed_out) {
@@ -1103,6 +1212,42 @@ void mybot_wifi_deinit(mybot_wifi_t *wifi) {
     mock_unlock();
 }
 
+static void submit_mock_service_request(const mybot_device_lifecycle_callbacks_t *callbacks,
+                                        mybot_device_service_request_type_t type,
+                                        const char *reason) {
+    observe_control_thread(0);
+    assert(callbacks->submit_service_request != NULL);
+    mybot_device_service_request_t *request = aosl_hal_malloc(sizeof(*request));
+    assert(request != NULL);
+    memset(request, 0, sizeof(*request));
+    request->type = type;
+    request->network_generation = 11;
+    request->binding_generation = 17;
+    snprintf(request->server_base, sizeof(request->server_base), "%s", TEST_SERVER_BASE);
+    snprintf(request->device_id, sizeof(request->device_id), "%s", "device-1");
+    snprintf(request->credential, sizeof(request->credential), "%s", "device-service-token");
+    if (type == MYBOT_DEVICE_SERVICE_STOP) {
+        snprintf(request->payload.stop.conversation_id,
+                 sizeof(request->payload.stop.conversation_id), "%s", "conversation-1");
+        snprintf(request->payload.stop.reason, sizeof(request->payload.stop.reason), "%s", reason);
+    }
+    assert(callbacks->submit_service_request(request, callbacks->user_data) == 0);
+}
+
+void mybot_device_lifecycle_service_result(mybot_device_lifecycle_t *lifecycle,
+                                           const mybot_device_service_request_t *request) {
+    assert(lifecycle == s_device_lifecycle);
+    assert(request != NULL);
+    assert(request->network_generation == 11);
+    assert(request->binding_generation == 17);
+    assert(request->type == MYBOT_DEVICE_SERVICE_STOP || request->result == 0);
+    observe_control_thread(0);
+    mock_lock();
+    s_service_result_calls++;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+}
+
 int mybot_device_lifecycle_init(mybot_device_lifecycle_t *lifecycle, mybot_kv_store_t *kv_store,
                                 const char *server_base, const char *device_id,
                                 const char *firmware_ver, const char *hw_model,
@@ -1131,6 +1276,7 @@ int mybot_device_lifecycle_init(mybot_device_lifecycle_t *lifecycle, mybot_kv_st
     s_device_pair_requested = false;
     s_device_token_renewal_requested = false;
     s_device_network_available = true;
+    s_service_poll_requested = false;
     s_device_init_calls++;
     mock_unlock();
     if (callbacks->on_state_changed) {
@@ -1149,6 +1295,7 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
         DEVICE_TICK_START,
         DEVICE_TICK_STOP,
         DEVICE_TICK_RENEW_TOKEN,
+        DEVICE_TICK_POLL,
     } action = DEVICE_TICK_IDLE;
 
     mock_lock();
@@ -1183,10 +1330,19 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
         s_device_state = MYBOT_DEVICE_STATE_IN_CONVERSATION;
         callbacks = s_device_callbacks;
         action = DEVICE_TICK_START;
+    } else if (s_service_poll_requested) {
+        s_service_poll_requested = false;
+        callbacks = s_device_callbacks;
+        action = DEVICE_TICK_POLL;
     }
     mock_unlock();
 
     if (action == DEVICE_TICK_IDLE) {
+        return;
+    }
+
+    if (action == DEVICE_TICK_POLL) {
+        submit_mock_service_request(&callbacks, MYBOT_DEVICE_SERVICE_DEVICE_POLL, NULL);
         return;
     }
 
@@ -1213,6 +1369,8 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
         if (callbacks.on_state_changed) {
             callbacks.on_state_changed(MYBOT_DEVICE_STATE_RUNTIME, callbacks.user_data);
         }
+        submit_mock_service_request(&callbacks, MYBOT_DEVICE_SERVICE_STOP,
+                                    MYBOT_CONVERSATION_STOP_REASON_USER_REQUESTED);
         return;
     }
 
@@ -1269,6 +1427,10 @@ void mybot_device_lifecycle_shutdown(mybot_device_lifecycle_t *lifecycle) {
     mock_unlock();
     if (stop_conversation && callbacks.on_conversation_stop) {
         callbacks.on_conversation_stop(callbacks.user_data);
+    }
+    if (stop_conversation) {
+        submit_mock_service_request(&callbacks, MYBOT_DEVICE_SERVICE_STOP,
+                                    MYBOT_CONVERSATION_STOP_REASON_DEVICE_HANGUP);
     }
 }
 
@@ -1426,10 +1588,12 @@ static void *stop_thread(void *arg) {
     (void)arg;
     mock_lock();
     s_stop_thread_entered = true;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
     mock_unlock();
     mybot_stop();
     mock_lock();
     s_stop_thread_returned = true;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
     mock_unlock();
     return NULL;
 }
@@ -1734,6 +1898,134 @@ static void test_service_startup_failures(const mybot_config_t *config) {
     }
 }
 
+static void service_barrier(const aosl_ts_t *ts, aosl_refobj_t ref, uintptr_t argc,
+                            uintptr_t argv[]) {
+    (void)ts;
+    (void)ref;
+    (void)argv;
+    assert(argc == 0);
+}
+
+static void drain_service_requests(void) {
+    mock_lock();
+    aosl_mpq_t service = s_test_service_mpq;
+    mock_unlock();
+    assert(!aosl_mpq_invalid(service));
+    assert(aosl_mpq_call(service, AOSL_REF_INVALID, "service_test_barrier", service_barrier, 0) ==
+           0);
+    drain_device_commands();
+}
+
+static void test_background_service_requests(const mybot_config_t *config) {
+    begin_control_thread_tracking();
+    mock_lock();
+    s_track_service_thread = true;
+    s_service_thread_valid = false;
+    mock_unlock();
+    assert(mybot_start(config) == 0);
+    emit_wifi_event(MYBOT_WIFI_EVENT_STA_CONNECTED);
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+
+    /* A status request remains blocked while both start and local hangup run. */
+    mock_lock();
+    s_block_service_poll = true;
+    s_service_poll_entered = false;
+    s_service_poll_requested = true;
+    int polls_before = s_service_poll_calls;
+    int results_before = s_service_result_calls;
+    int joins_before = s_rtc_join_calls;
+    int leaves_before = s_rtc_leave_calls;
+    mock_unlock();
+    wait_for_service_flag(&s_service_poll_entered);
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_START);
+    assert(wait_for_counter(&s_rtc_join_calls, joins_before + 1, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_IN_CONVERSATION, 1000));
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_STOP);
+    assert(wait_for_counter(&s_rtc_leave_calls, leaves_before + 1, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+    assert(read_counter(&s_service_poll_calls) == polls_before);
+    assert(read_counter(&s_service_result_calls) == results_before);
+    mock_lock();
+    s_block_service_poll = false;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    drain_service_requests();
+    assert(read_counter(&s_service_poll_calls) == polls_before + 1);
+    assert(read_counter(&s_service_result_calls) >= results_before + 1);
+
+    /* A slow stop POST must not hold up the next conversation's start. */
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_START);
+    assert(wait_for_counter(&s_rtc_join_calls, joins_before + 2, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_IN_CONVERSATION, 1000));
+    mock_lock();
+    s_block_service_stop = true;
+    s_service_stop_result = 503;
+    s_service_stop_entered = false;
+    int stops_before = s_service_stop_calls;
+    mock_unlock();
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_STOP);
+    assert(wait_for_counter(&s_rtc_leave_calls, leaves_before + 2, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+    wait_for_service_flag(&s_service_stop_entered);
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_START);
+    assert(wait_for_counter(&s_rtc_join_calls, joins_before + 3, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_IN_CONVERSATION, 1000));
+    assert(read_counter(&s_service_stop_calls) == stops_before);
+    mock_lock();
+    s_block_service_stop = false;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    drain_service_requests();
+    assert(read_counter(&s_service_stop_calls) == stops_before + 1);
+    mock_lock();
+    s_service_stop_result = 0;
+    mock_unlock();
+
+    /* Shutdown waits for HTTP ownership, discards its result, and still sends
+     * the final stop notification queued behind the in-flight poll. */
+    mock_lock();
+    s_block_service_poll = true;
+    s_service_poll_entered = false;
+    s_service_poll_requested = true;
+    s_stop_thread_entered = false;
+    s_stop_thread_returned = false;
+    results_before = s_service_result_calls;
+    stops_before = s_service_stop_calls;
+    int shutdowns_before = s_device_shutdown_calls;
+#if MYBOT_TEST_WRAP_APP_MPQ
+    int service_destroys_before = s_service_destroy_calls;
+#endif
+    mock_unlock();
+    wait_for_service_flag(&s_service_poll_entered);
+    pthread_t stop_tid;
+    int thread_result = pthread_create(&stop_tid, NULL, stop_thread, NULL);
+    assert(thread_result == 0);
+    wait_for_service_flag(&s_stop_thread_entered);
+    assert(wait_for_counter(&s_device_shutdown_calls, shutdowns_before + 1, 1000));
+#if MYBOT_TEST_WRAP_APP_MPQ
+    assert(wait_for_counter(&s_service_destroy_calls, service_destroys_before + 1, 1000));
+#endif
+    assert(!mybot_is_running());
+    assert(!read_bool(&s_stop_thread_returned));
+    assert(read_counter(&s_service_result_calls) == results_before);
+    mock_lock();
+    s_block_service_poll = false;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    wait_for_service_flag(&s_stop_thread_returned);
+    thread_result = pthread_join(stop_tid, NULL);
+    assert(thread_result == 0);
+    assert(mybot_get_state() == MYBOT_STATE_STOPPED);
+    assert(read_counter(&s_service_stop_calls) == stops_before + 1);
+    assert(read_counter(&s_service_result_calls) == results_before);
+    mock_lock();
+    assert(s_control_thread_valid && !s_control_thread_mismatch);
+    assert(s_service_thread_valid);
+    s_track_control_thread = false;
+    s_track_service_thread = false;
+    mock_unlock();
+}
+
 #if MYBOT_TEST_WRAP_APP_MPQ
 static void test_control_queue_failures(const mybot_config_t *config) {
     int wifi_before = read_counter(&s_wifi_init_calls);
@@ -1743,6 +2035,17 @@ static void test_control_queue_failures(const mybot_config_t *config) {
     assert(mybot_get_state() == MYBOT_STATE_STOPPED);
     assert(read_counter(&s_wifi_init_calls) == wifi_before);
     s_control_create_fails = false;
+
+    s_service_create_fails = true;
+    assert(mybot_start(config) == 0);
+    emit_wifi_event(MYBOT_WIFI_EVENT_STA_CONNECTED);
+    assert(wait_for_app_state(MYBOT_STATE_FAILED, 1000));
+    assert(wait_for_runtime_exit(1000));
+    mybot_stop();
+    assert(!mybot_is_running());
+    assert(mybot_get_state() == MYBOT_STATE_STOPPED);
+    s_service_create_fails = false;
+    wifi_before = read_counter(&s_wifi_init_calls);
 
     s_control_call_fails = true;
     assert(mybot_start(config) < 0);
@@ -1795,6 +2098,29 @@ static void test_control_queue_failures(const mybot_config_t *config) {
     assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
     mybot_stop();
     assert(mybot_get_state() == MYBOT_STATE_STOPPED);
+
+    /* A failed HTTP-worker join keeps its runtime reference until a later stop
+     * can drain it; it must also prevent a new start from reusing the runtime. */
+    assert(mybot_start(config) == 0);
+    emit_wifi_event(MYBOT_WIFI_EVENT_STA_CONNECTED);
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+    mock_lock();
+    s_service_destroy_fails = true;
+    int service_failures_before = s_service_destroy_failures;
+    mock_unlock();
+    mybot_stop();
+    assert(!mybot_is_running());
+    assert(read_counter(&s_service_destroy_failures) > service_failures_before);
+    assert(mybot_start(config) < 0);
+    mock_lock();
+    s_service_destroy_fails = false;
+    mock_unlock();
+    mybot_stop();
+    assert(mybot_get_state() == MYBOT_STATE_STOPPED);
+    assert(mybot_start(config) == 0);
+    emit_wifi_event(MYBOT_WIFI_EVENT_STA_CONNECTED);
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+    mybot_stop();
 }
 #endif
 
@@ -2545,6 +2871,7 @@ int main(void) {
 
     test_control_queue_saturation(&config);
     test_service_startup_failures(&config);
+    test_background_service_requests(&config);
 #if MYBOT_TEST_WRAP_APP_MPQ
     test_control_queue_failures(&config);
 #endif

@@ -6,6 +6,7 @@ This project follows Semantic Versioning.
 
 ### Added
 
+- Document regional device-service addresses for mainland China and overseas deployments.
 - Handle cloud MCP DeviceCommand v1 messages through the existing RTM/control path with exact
   session checks and deduplication of the 16 most recently accepted command IDs. Reuse
   hardware/software playback volume control and add independent speaker mute without stopping
@@ -20,6 +21,10 @@ This project follows Semantic Versioning.
 
 ### Fixed
 
+- Move binding-status polling and single-attempt HTTPS stop notifications to a background service
+  worker so slow requests do not delay local hangup or a new conversation trigger. Keep lifecycle
+  state on the control worker, discard stale polling results, and drain background requests before
+  releasing runtime resources. HTTPS adapters must support two independent concurrent connections.
 - Remove the UTC clock dependency from MCP device commands. `issued_at` and `expires_at` are
   optional and currently ignored; a full command-ID cache replaces its oldest entry instead of
   rejecting new commands.

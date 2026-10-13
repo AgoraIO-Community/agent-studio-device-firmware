@@ -146,11 +146,21 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Run the example:
+### Device-service addresses
+
+Choose the base URL for the device's region. Pass it through `--server` in the Linux example or
+`mybot_config_t.server_base` in a product integration, including `/api` without a trailing slash.
+
+| Region | Device-service base URL |
+| --- | --- |
+| Mainland China | `https://botstation.shengwang.cn/api` |
+| Overseas | `https://botstation.agora.io/api` |
+
+Run the example with the overseas service:
 
 ```bash
 ./build/examples/linux/mybot \
-  --server https://api.example.com \
+  --server https://botstation.agora.io/api \
   --device-id AG-DEMO-001 \
   --fw-ver 1.2.0 \
   --hw-model linux-reference
@@ -379,8 +389,11 @@ Layer notes:
 
 ### Threading model
 
-Application control, RTC, capture, playback, and audio sending use separate workers. The platform
-owns the optional video encoder task. For the thread/stack budget, dynamic allocations, and timing
+Application control, background device-service HTTP, RTC, capture, playback, and audio sending
+use separate workers. `service_mpq` handles binding-status polling and stop notifications; their
+results return to `control_mpq`, which owns lifecycle state. HTTPS adapters must support concurrent
+independent connections. The platform owns the optional video encoder task.
+For the thread/stack budget, dynamic allocations, and timing
 measurements, see [EMBEDDED](docs/EMBEDDED.md); platform callback contracts live in the
 [public headers](include/mybot/platform/).
 

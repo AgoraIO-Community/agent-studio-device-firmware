@@ -145,6 +145,7 @@ static bool load_device_auth(mybot_device_lifecycle_t *lifecycle) {
 }
 
 static void clear_device_auth(mybot_device_lifecycle_t *lifecycle) {
+    lifecycle->binding_generation++;
     lifecycle->device_token[0] = '\0';
     if (mybot_kv_store_erase(lifecycle->kv_store, MYBOT_DEVICE_AUTH_KEY) < 0) {
         AOSL_LOG_ERR("failed to erase persisted device credential");
@@ -197,6 +198,7 @@ static void action_create_pair_code(mybot_device_lifecycle_t *lifecycle) {
     AOSL_LOG_NTC("pair-code obtained: code=%s, poll=%ds", resp.code, resp.poll_after_seconds);
 
     /* Save pair token and poll settings */
+    lifecycle->binding_generation++;
     strncpy(lifecycle->pair_token, resp.pair_token, sizeof(lifecycle->pair_token) - 1);
     lifecycle->pair_poll_interval = clamp_poll_interval(resp.poll_after_seconds);
     lifecycle->pair_tick_counter = 0;
@@ -213,41 +215,68 @@ static void action_create_pair_code(mybot_device_lifecycle_t *lifecycle) {
 }
 
 /* ----------------------------------------------------------
- * Action: check claim status during pairing
+ * Background service request snapshots
  * ---------------------------------------------------------- */
-static void action_poll_binding_pair(mybot_device_lifecycle_t *lifecycle) {
-    char auth[MYBOT_DEVICE_CLIENT_MAX_TOKEN + 16];
-    snprintf(auth, sizeof(auth), "Pair %s", lifecycle->pair_token);
+static mybot_device_service_request_t *
+create_service_request(const mybot_device_lifecycle_t *lifecycle,
+                       mybot_device_service_request_type_t type) {
+    mybot_device_service_request_t *request = aosl_hal_malloc(sizeof(*request));
+    if (!request) {
+        AOSL_LOG_ERR("failed to allocate background service request");
+        return NULL;
+    }
+    memset(request, 0, sizeof(*request));
+    request->type = type;
+    request->network_generation = aosl_atomic_read(&lifecycle->network_generation);
+    request->binding_generation = lifecycle->binding_generation;
+    memcpy(request->server_base, lifecycle->server_base, sizeof(request->server_base));
+    memcpy(request->device_id, lifecycle->device_id, sizeof(request->device_id));
+    memcpy(request->credential,
+           type == MYBOT_DEVICE_SERVICE_PAIR_POLL ? lifecycle->pair_token : lifecycle->device_token,
+           sizeof(request->credential));
+    return request;
+}
 
-    mybot_device_binding_t *resp = (mybot_device_binding_t *)aosl_hal_malloc(sizeof(*resp));
-    if (!resp) {
-        AOSL_LOG_ERR("failed to allocate pair-status response");
+static bool submit_service_request(mybot_device_lifecycle_t *lifecycle,
+                                   mybot_device_service_request_t *request) {
+    if (!lifecycle->cbs.submit_service_request ||
+        lifecycle->cbs.submit_service_request(request, lifecycle->cbs.user_data) < 0) {
+        AOSL_LOG_ERR("failed to queue background service request (type=%d)", request->type);
+        aosl_hal_free(request);
+        return false;
+    }
+    return true;
+}
+
+static void action_poll_binding(mybot_device_lifecycle_t *lifecycle,
+                                mybot_device_service_request_type_t type) {
+    if (lifecycle->poll_pending) {
         return;
     }
-    memset(resp, 0, sizeof(*resp));
-
-    intptr_t network_generation = aosl_atomic_read(&lifecycle->network_generation);
-    if (!aosl_atomic_read(&lifecycle->network_available)) {
-        aosl_hal_free(resp);
+    mybot_device_service_request_t *request = create_service_request(lifecycle, type);
+    if (!request) {
         return;
     }
-
-    int ret = mybot_device_client_get_binding_status(lifecycle->server_base, lifecycle->device_id,
-                                                     auth, resp);
-    if (!network_request_is_current(lifecycle, network_generation)) {
-        AOSL_LOG_WRN("discarding pair-status response after network change");
-        aosl_hal_free(resp);
-        return;
+    lifecycle->poll_pending = true;
+    if (!submit_service_request(lifecycle, request)) {
+        lifecycle->poll_pending = false;
     }
+}
+
+/* ----------------------------------------------------------
+ * Apply claim status during pairing
+ * ---------------------------------------------------------- */
+static void apply_binding_pair(mybot_device_lifecycle_t *lifecycle,
+                               const mybot_device_service_request_t *request) {
+    int ret = request->result;
+    const mybot_device_binding_t *resp = &request->payload.binding;
     if (api_rejected_device_auth(ret)) {
         AOSL_LOG_WRN("pair credential rejected (HTTP %d), requesting a new pair code", ret);
         lifecycle->pairing_requested = true;
-        aosl_hal_free(resp);
         return;
     }
     if (ret != 0) {
         AOSL_LOG_ERR("bind poll (pair) failed, retrying");
-        aosl_hal_free(resp);
         return;
     }
 
@@ -258,17 +287,16 @@ static void action_poll_binding_pair(mybot_device_lifecycle_t *lifecycle) {
         /* Stay in awaiting_claim. */
     } else if (strcmp(resp->status, "bound") == 0) {
         if (resp->device_token[0]) {
+            lifecycle->binding_generation++;
             strncpy(lifecycle->device_token, resp->device_token,
                     sizeof(lifecycle->device_token) - 1);
         }
         if (!lifecycle->device_token[0]) {
             AOSL_LOG_ERR("bound response did not include the one-time device credential");
-            aosl_hal_free(resp);
             return;
         }
         if (persist_device_auth(lifecycle) < 0) {
             AOSL_LOG_ERR("failed to persist device credential, retrying");
-            aosl_hal_free(resp);
             return;
         }
         AOSL_LOG_NTC("device credential persisted");
@@ -290,7 +318,6 @@ static void action_poll_binding_pair(mybot_device_lifecycle_t *lifecycle) {
         /* Unknown status. */
         AOSL_LOG_ERR("unknown bind status: %s", resp->status);
     }
-    aosl_hal_free(resp);
 }
 
 /* ----------------------------------------------------------
@@ -305,39 +332,17 @@ static void invalidate_runtime_binding(mybot_device_lifecycle_t *lifecycle) {
     restart_pairing_after_auth_rejection(lifecycle);
 }
 
-static void action_poll_binding_runtime(mybot_device_lifecycle_t *lifecycle) {
-    char auth[MYBOT_DEVICE_CLIENT_MAX_TOKEN + 16];
-    snprintf(auth, sizeof(auth), "Device %s", lifecycle->device_token);
-
-    mybot_device_binding_t *resp = (mybot_device_binding_t *)aosl_hal_malloc(sizeof(*resp));
-    if (!resp) {
-        AOSL_LOG_ERR("failed to allocate runtime-status response");
-        return;
-    }
-    memset(resp, 0, sizeof(*resp));
-
-    intptr_t network_generation = aosl_atomic_read(&lifecycle->network_generation);
-    if (!aosl_atomic_read(&lifecycle->network_available)) {
-        aosl_hal_free(resp);
-        return;
-    }
-
-    int ret = mybot_device_client_get_binding_status(lifecycle->server_base, lifecycle->device_id,
-                                                     auth, resp);
-    if (!network_request_is_current(lifecycle, network_generation)) {
-        AOSL_LOG_WRN("discarding runtime-status response after network change");
-        aosl_hal_free(resp);
-        return;
-    }
+static void apply_binding_runtime(mybot_device_lifecycle_t *lifecycle,
+                                  const mybot_device_service_request_t *request) {
+    int ret = request->result;
+    const mybot_device_binding_t *resp = &request->payload.binding;
     if (api_rejected_device_auth(ret)) {
         AOSL_LOG_WRN("device credential rejected (HTTP %d), re-pairing", ret);
         invalidate_runtime_binding(lifecycle);
-        aosl_hal_free(resp);
         return;
     }
     if (ret != 0) {
         AOSL_LOG_ERR("bind poll (device) failed, retrying");
-        aosl_hal_free(resp);
         return;
     }
 
@@ -349,7 +354,6 @@ static void action_poll_binding_runtime(mybot_device_lifecycle_t *lifecycle) {
     } else {
         AOSL_LOG_ERR("unexpected runtime status: %s", resp->status);
     }
-    aosl_hal_free(resp);
 }
 
 static void tick_runtime_binding_poll(mybot_device_lifecycle_t *lifecycle) {
@@ -357,7 +361,7 @@ static void tick_runtime_binding_poll(mybot_device_lifecycle_t *lifecycle) {
     int interval_ticks = lifecycle->runtime_poll_interval * 10;
     if (lifecycle->runtime_tick_counter >= interval_ticks) {
         lifecycle->runtime_tick_counter = 0;
-        action_poll_binding_runtime(lifecycle);
+        action_poll_binding(lifecycle, MYBOT_DEVICE_SERVICE_DEVICE_POLL);
     }
 }
 
@@ -460,7 +464,7 @@ static void action_stop_conversation(mybot_device_lifecycle_t *lifecycle, const 
     memcpy(conversation_id, lifecycle->conversation_id, sizeof(conversation_id));
     intptr_t network_generation = aosl_atomic_read(&lifecycle->network_generation);
 
-    /* Finish RTC/media teardown and publish the local state before blocking on HTTP. */
+    /* Finish RTC/media teardown and publish the local state before queuing HTTP. */
     complete_conversation_locally(lifecycle);
     if (!conversation_id[0]) {
         AOSL_LOG_ERR("stop notification skipped: missing conversation_id; local session stopped");
@@ -470,19 +474,21 @@ static void action_stop_conversation(mybot_device_lifecycle_t *lifecycle, const 
         return;
     }
 
-    /* The server also ends the session when the device leaves RTC; notify it once. */
-    int ret =
-        mybot_device_client_stop_conversation(lifecycle->server_base, lifecycle->device_id,
-                                              lifecycle->device_token, conversation_id, reason);
-
-    if (!network_request_is_current(lifecycle, network_generation)) {
-        AOSL_LOG_WRN("discarding stop-conversation response after network change");
+    mybot_device_service_request_t *request =
+        create_service_request(lifecycle, MYBOT_DEVICE_SERVICE_STOP);
+    if (!request) {
         return;
     }
+    memcpy(request->payload.stop.conversation_id, conversation_id, sizeof(conversation_id));
+    snprintf(request->payload.stop.reason, sizeof(request->payload.stop.reason), "%s", reason);
+    /* The server also ends the session when the device leaves RTC; notify it once. */
+    (void)submit_service_request(lifecycle, request);
+}
 
+static void apply_stop_result(mybot_device_lifecycle_t *lifecycle, int ret) {
     if (api_rejected_device_auth(ret)) {
         AOSL_LOG_WRN("device credential rejected while stopping conversation (HTTP %d)", ret);
-        restart_pairing_after_auth_rejection(lifecycle);
+        invalidate_runtime_binding(lifecycle);
         return;
     }
 
@@ -594,6 +600,33 @@ int mybot_device_lifecycle_init(mybot_device_lifecycle_t *lifecycle, mybot_kv_st
     return 0;
 }
 
+void mybot_device_lifecycle_service_result(mybot_device_lifecycle_t *lifecycle,
+                                           const mybot_device_service_request_t *request) {
+    if (request->type != MYBOT_DEVICE_SERVICE_STOP) {
+        /* Keep one poll outstanding across reconnect/re-pair until its owner returns it. */
+        lifecycle->poll_pending = false;
+    }
+    if (aosl_atomic_read(&lifecycle->shutting_down) ||
+        !network_request_is_current(lifecycle, request->network_generation) ||
+        lifecycle->binding_generation != request->binding_generation ||
+        lifecycle->pairing_requested) {
+        AOSL_LOG_DBG("discarding stale background service result (type=%d)", request->type);
+        return;
+    }
+
+    mybot_device_state_t state = current_state(lifecycle);
+    if (request->type == MYBOT_DEVICE_SERVICE_PAIR_POLL &&
+        state == MYBOT_DEVICE_STATE_AWAITING_CLAIM) {
+        apply_binding_pair(lifecycle, request);
+    } else if (state == MYBOT_DEVICE_STATE_RUNTIME || state == MYBOT_DEVICE_STATE_IN_CONVERSATION) {
+        if (request->type == MYBOT_DEVICE_SERVICE_DEVICE_POLL) {
+            apply_binding_runtime(lifecycle, request);
+        } else if (request->type == MYBOT_DEVICE_SERVICE_STOP) {
+            apply_stop_result(lifecycle, request->result);
+        }
+    }
+}
+
 void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
     if (aosl_atomic_read(&lifecycle->shutting_down)) {
         return;
@@ -626,7 +659,6 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
         if (current_state(lifecycle) == MYBOT_DEVICE_STATE_IN_CONVERSATION) {
             action_stop_conversation(lifecycle, MYBOT_CONVERSATION_STOP_REASON_USER_REQUESTED);
         }
-        /* Auth rejection during stop may request pairing again; this flow consumes it too. */
         lifecycle->pairing_requested = false;
         clear_device_auth(lifecycle);
         lifecycle->conversation_id[0] = '\0';
@@ -657,7 +689,7 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
         int interval_ticks = lifecycle->pair_poll_interval * 10;
         if (lifecycle->pair_tick_counter >= interval_ticks) {
             lifecycle->pair_tick_counter = 0;
-            action_poll_binding_pair(lifecycle);
+            action_poll_binding(lifecycle, MYBOT_DEVICE_SERVICE_PAIR_POLL);
         }
         return;
     }
@@ -766,7 +798,7 @@ void mybot_device_lifecycle_notify_conversation_ended(mybot_device_lifecycle_t *
         return;
     }
     /* RTC callbacks only publish this mailbox. The control owner leaves RTC,
-     * then notifies the service from tick(), avoiding re-entrant SDK calls. */
+     * then queues the service notification from tick(), avoiding RTC re-entry. */
     if (current_state(lifecycle) == MYBOT_DEVICE_STATE_IN_CONVERSATION) {
         aosl_atomic_set(&lifecycle->stop_request, MYBOT_STOP_REQUEST_ERROR);
     }

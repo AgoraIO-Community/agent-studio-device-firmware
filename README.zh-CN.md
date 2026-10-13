@@ -120,11 +120,21 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-运行示例：
+### 设备服务地址
+
+按设备使用区域选择服务地址，通过 Linux 示例的 `--server` 或产品集成中的
+`mybot_config_t.server_base` 配置。地址包含 `/api`，末尾不带 `/`。
+
+| 区域 | 设备服务地址 |
+| --- | --- |
+| 国内 | `https://botstation.shengwang.cn/api` |
+| 海外 | `https://botstation.agora.io/api` |
+
+使用国内服务运行示例：
 
 ```bash
 ./build/examples/linux/mybot \
-  --server https://api.example.com \
+  --server https://botstation.shengwang.cn/api \
   --device-id AG-DEMO-001 \
   --fw-ver 1.2.0 \
   --hw-model linux-reference
@@ -335,7 +345,9 @@ flowchart TB
 
 ### 线程模型
 
-应用控制、RTC、音频采集、播放和发送分别由独立线程负责，可选的视频编码器任务由平台持有。
+应用控制、后台设备服务 HTTP、RTC、音频采集、播放和发送分别由独立线程负责。
+`service_mpq` 处理绑定状态轮询和停止通知，结果返回负责生命周期状态的 `control_mpq`。
+HTTPS 适配层需支持独立连接并发调用，可选的视频编码器任务由平台持有。
 线程与栈预算、动态分配和时序测量见 [EMBEDDED](docs/EMBEDDED.zh-CN.md)，平台回调契约以
 [公共头文件](include/mybot/platform/) 为准。
 

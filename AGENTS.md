@@ -76,6 +76,11 @@ the platform performs capture and encoding.
 - `control_mpq` owns application lifecycle/control work. `rtc_mpq` serializes RTSA state and calls;
   vendor callbacks copy borrowed payloads before asynchronous dispatch. Never queue a pointer to
   a stack object or expired callback buffer. Check the actual MPQ API for copy and wait semantics.
+- `service_mpq` executes binding-status polls and single-attempt stop notifications using owned
+  request snapshots. Only `control_mpq` applies results after checking network and binding
+  generations; keep at most one poll outstanding. Background work must not synchronously wait
+  for control. Drain the service worker before releasing the AOSL reference at shutdown.
+  HTTPS operations on independent connection handles must support concurrent calls.
 - Keep platform/RTSA callbacks short. Do not call `mybot_stop()` from a callback that shutdown must
   drain. Avoid RTC re-entry from application callbacks running on `rtc_mpq`.
 - Audio capture, playback, and send use separate workers. Keep slow HTTP, parsing, and verbose

@@ -21,6 +21,12 @@ extern "C" {
  *
  * The implementation wraps the platform TLS stack (e.g. mbedTLS, BearSSL or a
  * chipset TLS socket API). The SDK core does not link OpenSSL.
+ *
+ * @note Control requests and background device-service requests may run concurrently
+ *       on separate SDK workers. Each connect() must create an independent connection
+ *       context, and operations on different connections must support concurrent calls.
+ *       The SDK calls send(), recv(), and close() sequentially for each connection;
+ *       the implementation need not support concurrent operations on the same handle.
  */
 typedef struct {
     /**
