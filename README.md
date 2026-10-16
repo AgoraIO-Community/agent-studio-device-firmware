@@ -1,11 +1,11 @@
-# mybot
+# agent-studio-device-firmware
 
-[![CI](https://github.com/junlon2006/mybot/actions/workflows/ci.yml/badge.svg)](https://github.com/junlon2006/mybot/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/junlon2006/mybot)](LICENSE)
+[![CI](https://github.com/AgoraIO-Community/agent-studio-device-firmware/actions/workflows/ci.yml/badge.svg)](https://github.com/AgoraIO-Community/agent-studio-device-firmware/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/AgoraIO-Community/agent-studio-device-firmware)](LICENSE)
 
 **[English](README.md) | [简体中文](README.zh-CN.md)**
 
-`mybot` is a cross-platform **AI multimodal interaction SDK** for edge devices: it lets smart devices
+`agent-studio-device-firmware` is a cross-platform **AI multimodal interaction SDK** for edge devices: it lets smart devices
 send voice and optional device-camera video to cloud AI agents over Agora RTC for real-time
 conversation and visual recognition. The platform/application owns
 network provisioning and Wi-Fi credentials; the SDK consumes connectivity events and handles device
@@ -166,7 +166,7 @@ override the location with the `MYBOT_KV_STORE_DIR` environment variable.
 
 ## Integrating into a host project
 
-We recommend vendoring the repository as a source submodule, and mybot itself depends on AOSL
+We recommend vendoring the repository as a source submodule, and the SDK itself depends on AOSL
 through a nested submodule — initialize submodules after adding it with
 `git submodule update --init --recursive`.
 The host must provide an Agora RTSA header and shared or static library matching the target
@@ -201,14 +201,14 @@ creating any platform resources. Every platform is submitted through this one de
 full implementation order, minimal code, threading constraints, and acceptance checklist, see
 [docs/PORTING.md](docs/PORTING.md).
 
-The product completes network provisioning before starting MyBot and stops MyBot before entering
+The product completes network provisioning before starting the SDK and stops it before entering
 provisioning again. The SDK owns device-service pairing and conversations, independently of that
 network setup. See [PORTING: start and stop](docs/PORTING.md#step-6-start-and-stop) for the
 integration sequence and example, and [mybot.h](include/mybot/mybot.h) for the API contract.
 
 The bundled Linux RTSA package is a shared library. CMake supplies a build-tree runtime path for the
 reference executable and tests. Installed-package consumers must deploy `libagora-rtc-sdk.so` and
-make it discoverable through their install RPATH or runtime loader configuration; the mybot CMake
+make it discoverable through their install RPATH or runtime loader configuration; the SDK CMake
 install target does not install or redistribute that dependency.
 
 ## Build configuration
@@ -229,7 +229,7 @@ The following options can be set via the CMake command line or cache variables b
 | `MYBOT_ALLOW_INSECURE_HTTP` | `OFF` | Local development only: explicitly allow plaintext HTTP |
 | `MYBOT_ENABLE_ASAN` | `OFF` | GCC/Clang AddressSanitizer; recommended for host tests |
 | `MYBOT_ENABLE_UBSAN` | `OFF` | GCC/Clang UndefinedBehaviorSanitizer; recommended for host tests |
-| `MYBOT_ENABLE_COVERAGE` | `OFF` | Instrument mybot targets for gcov; used by the CI coverage job |
+| `MYBOT_ENABLE_COVERAGE` | `OFF` | Instrument SDK targets for gcov; used by the CI coverage job |
 
 Two independent variables select platform code: `CONFIG_PLATFORM` chooses the AOSL HAL port
 consumed by `third_party/aosl` (e.g. `linux`, `esp32`), while `MYBOT_BUILD_LINUX_PLATFORM` builds
@@ -425,7 +425,7 @@ lets the cloud agent support user interruption.
 ```mermaid
 flowchart LR
     camera["Camera"] --> encoder["Platform encoder"]
-    encoder -->|JPEG · H.264 · H.265| video["MyBot video handler"]
+    encoder -->|JPEG · H.264 · H.265| video["SDK video handler"]
     video --> rtc_v["Agora RTC video uplink"]
     rtc_v --> vision["Cloud AI visual recognition"]
 ```
@@ -436,7 +436,7 @@ uplink capacity. The device sends only the primary video stream; remote video su
 ## Repository layout
 
 ```text
-mybot/
+agent-studio-device-firmware/
 ├── include/mybot/          # public headers and platform interface specifications
 ├── src/                    # cross-platform implementation; internal/ is not public API
 ├── platforms/linux/        # Linux reference implementations (ALSA/stdin/file/console)
@@ -462,9 +462,9 @@ projects linked below.
 - [Public headers](include/mybot/) — authoritative API and platform contracts; this README is the overview
 - [docs/PORTING.md](docs/PORTING.md) ([简体中文](docs/PORTING.zh-CN.md)) — porting guide and
   integration sequence and acceptance checklist
-- [mybot-bk7258](https://github.com/junlon2006/mybot-bk7258) — BK7258 reference firmware project
-- [mybot-bk7259](https://github.com/junlon2006/mybot-bk7259) — BK7259 reference firmware project
-- [mybot-esp32](https://github.com/junlon2006/mybot-esp32) — ESP32 cross-platform reference project
+- [agora-r1-devkit](https://github.com/AgoraIO-Community/agora-r1-devkit) — BK7258 reference firmware project
+- [agora-r2-standard-devkit](https://github.com/AgoraIO-Community/agora-r2-standard-devkit) — BK7259 reference firmware project
+- [agora-esp32-devkit](https://github.com/AgoraIO-Community/agora-esp32-devkit) — ESP32 cross-platform reference project
 - [docs/EMBEDDED.md](docs/EMBEDDED.md) ([简体中文](docs/EMBEDDED.zh-CN.md)) — footprint, memory,
   thread/stack, timing, power and logging guidance for MCU integrators
 - [docs/RELEASING.md](docs/RELEASING.md) ([简体中文](docs/RELEASING.zh-CN.md)) — release process

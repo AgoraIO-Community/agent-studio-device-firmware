@@ -15,7 +15,7 @@
 - [ ] 在发布源码制品中展开固定版本的 AOSL 源码。GitHub 自动生成的 **Source code** 归档
       不包含 submodule，也没有 `.git` 元数据，无法通过 `git submodule update` 补齐。
       用户应下载发布页的源码制品，或执行
-      `git clone --recurse-submodules https://github.com/junlon2006/mybot.git`。
+      `git clone --recurse-submodules https://github.com/AgoraIO-Community/agent-studio-device-firmware.git`。
 - [ ] 确认没有跟踪任何密钥、token、私有端点、客户数据或生成的 KV 数据。
 
 ## 验证
@@ -28,9 +28,9 @@
 - [ ] 使用随附 RTSA 软件包测试 60 ms；20/40 ms 仅在提供匹配 RTSA 软件包时测试。
 - [ ] 使用兼容服务验证 RTM 登录、会话 channel 订阅以及
       `VP_REGISTER_SUCCESS` LCD 指示器。
-- [ ] BK 设备验证使用独立的 [BK7258](https://github.com/junlon2006/mybot-bk7258) 或
-      [BK7259](https://github.com/junlon2006/mybot-bk7259) 固件工程，验证声纹注册中/成功标记，
-      以及 MyBot 启动前完整播报配网成功提示音。
+- [ ] BK 设备验证使用独立的 [BK7258](https://github.com/AgoraIO-Community/agora-r1-devkit) 或
+      [BK7259](https://github.com/AgoraIO-Community/agora-r2-standard-devkit) 固件工程，验证声纹注册中/成功标记，
+      以及 SDK 启动前完整播报配网成功提示音。
 - [ ] 在真实硬件上运行配网、配对、双向音频、挂断、关闭与重启。
 - [ ] 测试网络丢失、音频设备丢失、存储失败与部分启动失败。
 - [ ] 确认日志与发布压缩包不含任何凭据。
