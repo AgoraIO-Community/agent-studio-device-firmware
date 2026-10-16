@@ -17,7 +17,7 @@
 - [ ] Include the pinned AOSL sources in the release source asset. GitHub's automatic **Source code**
       archives omit submodules and have no `.git` metadata, so `git submodule update` cannot populate
       them. Users should download the release source asset or clone the repository with
-      `git clone --recurse-submodules https://github.com/junlon2006/mybot.git`.
+      `git clone --recurse-submodules https://github.com/AgoraIO-Community/agent-studio-device-firmware.git`.
 - [ ] Confirm no secret, token, private endpoint, customer data, or generated KV data is tracked.
 
 ## Verify
@@ -31,9 +31,9 @@
 - [ ] Verify RTM login, conversation-channel subscription, and the
       `VP_REGISTER_SUCCESS` LCD indicator with a compatible service.
 - [ ] For BK device validation, use the independent
-      [BK7258](https://github.com/junlon2006/mybot-bk7258) or
-      [BK7259](https://github.com/junlon2006/mybot-bk7259) firmware project. Verify the pending/success
-      voiceprint markers and the provisioning-success prompt gate before MyBot startup.
+      [BK7258](https://github.com/AgoraIO-Community/agora-r1-devkit) or
+      [BK7259](https://github.com/AgoraIO-Community/agora-r2-standard-devkit) firmware project. Verify the pending/success
+      voiceprint markers and the provisioning-success prompt gate before SDK startup.
 - [ ] Run provisioning, pairing, bidirectional audio, hangup, shutdown, and reboot on real hardware.
 - [ ] Test network loss, audio-device loss, storage failure, and partial startup failure.
 - [ ] Confirm logs and release archives contain no credentials.

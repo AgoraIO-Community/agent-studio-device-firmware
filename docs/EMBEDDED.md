@@ -77,7 +77,7 @@ Preallocated PCM arrays do **not** make the end-to-end audio path allocation-fre
 
 Measure peak heap, minimum free heap, largest free block, and allocation rate during sustained
 audio/video, prompts, HTTP requests, and repeated start/stop. Include queued payloads, AOSL
-allocations, and allocator overhead, not only `aosl_hal_malloc()` calls made directly by MyBot.
+allocations, and allocator overhead, not only `aosl_hal_malloc()` calls made directly by the SDK.
 Use [PORTING.md](PORTING.md) for connectivity, pairing, and conversation lifecycle behavior.
 
 ## Threads and stacks

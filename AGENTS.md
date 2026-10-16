@@ -1,8 +1,8 @@
-# MyBot agent guide
+# agent-studio-device-firmware agent guide
 
-This file guides AI coding assistants working in the MyBot SDK repository. Follow the user's
-current task and any more specific instructions in the directory being changed. Keep work scoped
-to this repository unless the user includes another repository in the task.
+This file guides AI coding assistants working in the agent-studio-device-firmware SDK repository.
+Follow the user's current task and any more specific instructions in the directory being changed.
+Keep work scoped to this repository unless the user includes another repository in the task.
 
 ## Start here
 
@@ -18,8 +18,9 @@ to this repository unless the user includes another repository in the task.
 
 ## Project and source map
 
-MyBot is a C99 SDK for one device and one active AI conversation per process. Agora RTSA provides
-RTC/RTM, AOSL provides the portable runtime, and platform operations supply device capabilities.
+agent-studio-device-firmware is a C99 SDK for one device and one active AI conversation per process.
+Agora RTSA provides RTC/RTM, AOSL provides the portable runtime, and platform operations supply device
+capabilities.
 Audio is bidirectional. Optional JPEG/H.264/H.265 video is sent from the device to the server only;
 the platform performs capture and encoding.
 
@@ -71,8 +72,8 @@ the platform performs capture and encoding.
   process-wide; referenced operations tables must remain valid for the process lifetime.
 - The product/platform owns provisioning and network credentials. The SDK consumes connectivity
   events and owns device-service pairing and conversations. For independent provisioning tasks,
-  stop MyBot before entering provisioning and start it after usable network connectivity returns.
-  Do not implement a second SDK lifecycle state machine in the platform.
+  stop the agent-studio-device-firmware SDK before entering provisioning and start it after usable
+  network connectivity returns. Do not implement a second SDK lifecycle state machine in the platform.
 - `control_mpq` owns application lifecycle/control work. `rtc_mpq` serializes RTSA state and calls;
   vendor callbacks copy borrowed payloads before asynchronous dispatch. Never queue a pointer to
   a stack object or expired callback buffer. Check the actual MPQ API for copy and wait semantics.
@@ -177,10 +178,10 @@ doxygen build/docs/Doxyfile
 
 ## External references and handoff
 
-Reference firmware projects: [BK7258](https://github.com/junlon2006/mybot-bk7258),
-[BK7259](https://github.com/junlon2006/mybot-bk7259), and
-[ESP32](https://github.com/junlon2006/mybot-esp32). Inspect their actual revision and source when
-needed. SDK work does not implicitly authorize edits or synchronization in those repositories.
+Reference firmware projects: [BK7258](https://github.com/AgoraIO-Community/agora-r1-devkit),
+[BK7259](https://github.com/AgoraIO-Community/agora-r2-standard-devkit), and
+[ESP32](https://github.com/AgoraIO-Community/agora-esp32-devkit). Inspect their actual revision and
+source when needed. SDK work does not implicitly authorize edits or synchronization in those repositories.
 Maintain MCU adapters and firmware in those independent projects; do not reintroduce copies into
 this SDK repository. Keep the Linux reference here for development and host validation.
 

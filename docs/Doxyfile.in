@@ -1,10 +1,10 @@
-# Doxyfile for the mybot public API reference.
+# Doxyfile for the agent-studio-device-firmware public API reference.
 #
 # Generated from Doxyfile.in by CMake (configure_file); PROJECT_NUMBER stays
 # in sync with the version variables at the top of CMakeLists.txt. Build the
 # reference with: doxygen @CMAKE_CURRENT_BINARY_DIR@/docs/Doxyfile
 
-PROJECT_NAME           = "mybot"
+PROJECT_NAME           = "agent-studio-device-firmware"
 PROJECT_NUMBER         = "@MYBOT_VERSION_STRING@"
 PROJECT_BRIEF          = "Cross-platform AI voice-chat SDK for edge devices"
 

@@ -1,13 +1,13 @@
-# 将 mybot 移植到新平台
+# 将 agent-studio-device-firmware 移植到新平台
 
 > [English](PORTING.md) | 简体中文
 
-本文介绍如何将 mybot 1.2.0 集成到产品。接口契约、所有权和回调线程要求以
+本文介绍如何将 agent-studio-device-firmware 1.2.0 集成到产品。接口契约、所有权和回调线程要求以
 [mybot.h](../include/mybot/mybot.h) 与[平台公共头文件](../include/mybot/platform/)为准。
 公开 API 与 ABI 遵循语义化版本。平台代码必须只包含 `include/mybot` 下的头文件，
 并链接 `mybot::sdk`。
 
-mybot 设计为可移植到几乎任意平台——Linux、RTOS 或裸机——只要 AOSL 有对应的
+SDK 设计为可移植到几乎任意平台——Linux、RTOS 或裸机——只要 AOSL 有对应的
 `CONFIG_PLATFORM` 移植、且目标 ABI 存在 Agora RTSA 库。无论宿主操作系统或芯片厂商如何，
 以下集成流程均适用。
 
@@ -46,9 +46,9 @@ platforms/my_mcu/
 以下独立仓库维护 MCU 平台适配、板级配置、资源与固件构建，设备集成请直接使用对应工程。
 SDK 仓库保留 Linux 参考实现，不再同步 MCU 源码副本。
 
-- [mybot-bk7258](https://github.com/junlon2006/mybot-bk7258)：BK7258；
-- [mybot-bk7259](https://github.com/junlon2006/mybot-bk7259)：BK7259；
-- [mybot-esp32](https://github.com/junlon2006/mybot-esp32)：ESP32。
+- [agora-r1-devkit](https://github.com/AgoraIO-Community/agora-r1-devkit)：BK7258；
+- [agora-r2-standard-devkit](https://github.com/AgoraIO-Community/agora-r2-standard-devkit)：BK7259；
+- [agora-esp32-devkit](https://github.com/AgoraIO-Community/agora-esp32-devkit)：ESP32。
 
 可用这些工程了解目标构建集成、AOSL 平台接线、描述符注册和固件生命周期。参考工程存在
 差异时，接口契约和所有权边界以 SDK 公共头文件为准。
@@ -90,11 +90,11 @@ SDK 仓库保留 Linux 参考实现，不再同步 MCU 源码副本。
 ### 网络连接
 
 实现 [mybot_wifi_ops_t](../include/mybot/platform/mybot_wifi.h)，监听产品已有的网络管理器，
-并将其加入平台描述符。产品配网、凭据存储和建立网络连接独立于 MyBot。`init` 注册 SDK
+并将其加入平台描述符。产品配网、凭据存储和建立网络连接独立于 SDK。`init` 注册 SDK
 监听并上报当前可用连接；`destroy` 解除该监听，不关闭产品网络。事件顺序和回调生命周期
 遵循头文件契约。
 
-MyBot 运行期间持续上报断网和恢复事件。SDK 离线时暂停设备服务请求，重连后恢复；被中断的
+SDK 运行期间持续上报断网和恢复事件。SDK 离线时暂停设备服务请求，重连后恢复；被中断的
 会话在本地结束。进入配网是独立的产品操作，应遵循第 6 步的停止/启动顺序。
 Linux 适配器假定宿主已联网并立即上报已连接，不实现配网，也不监控宿主链路变化。
 
@@ -262,7 +262,7 @@ target_link_libraries(device_firmware PRIVATE mybot::sdk my_mcu_platform)
 （`platforms/linux/`）并要求 `CONFIG_PLATFORM=linux`。MCU 移植保持
 `MYBOT_BUILD_LINUX_PLATFORM=OFF`。宿主可预定义名为 `agora-rtc-sdk` 的导入目标。本版本支持
 `add_subdirectory()` 源码集成，也支持通过 `find_package(mybot)` 消费已安装包。源码集成需先
-初始化 mybot 的嵌套 AOSL submodule（在 mybot 检出目录执行
+初始化 SDK 的嵌套 AOSL submodule（在 agent-studio-device-firmware 检出目录执行
 `git submodule update --init --recursive`）。
 
 ## 第 6 步：启动与停止
@@ -270,11 +270,11 @@ target_link_libraries(device_firmware PRIVATE mybot::sdk my_mcu_platform)
 产品配网与 SDK 生命周期控制应保持独立职责：
 
 1. 产品使用已保存的凭据连接网络，或完成自身配网流程；网络可用后通知产品控制任务。
-2. 产品控制任务调用 `mybot_start()`，Wi-Fi 适配器上报已有连接，MyBot 才开始设备服务配对、
+2. 产品控制任务调用 `mybot_start()`，Wi-Fi 适配器上报已有连接，SDK 才开始设备服务配对、
    认证与会话流程。
 3. 再次进入配网前，由产品控制任务调用 `mybot_stop()` 并等待其完成，然后才将共享设备交给
-   配网流程；网络重新可用后再启动 MyBot。进入配网、配网成功等提示音归产品配网流程所有，
-   SDK 的配对码播报归 MyBot 所有。
+   配网流程；网络重新可用后再启动 SDK。进入配网、配网成功等提示音归产品配网流程所有，
+   SDK 的配对码播报归 SDK 所有。
 
 生命周期接口契约见 [mybot.h](../include/mybot/mybot.h)。下例由产品控制任务在网络可用后执行：
 
@@ -309,7 +309,7 @@ RTSA 生命周期通过 `agora_rtc_init()` / `agora_rtc_fini()` 管理。宿主�
 请求：`mybot_is_running()` 变为 false，产品控制任务必须调用 `mybot_stop()`。
 回调本身不会销毁资源。
 
-普通临时断网时保持 MyBot 运行，由产品网络管理器使用已有凭据重连，适配器依次上报断开与
+普通临时断网时保持 SDK 运行，由产品网络管理器使用已有凭据重连，适配器依次上报断开与
 重新可用的连接，不必每次断网都重新进入配网。SDK 会结束被中断的会话，并在重连后恢复
 设备服务请求；新的会话需要重新触发。
 
@@ -377,7 +377,7 @@ CMake 无法检查宿主导入目标的 ABI，宿主必须确保其头文件和�
 - 公开头文件以警告即错误编译通过，宿主只链接文档化的目标。
 - HTTPS 拒绝不受信任的 CA、过期证书、错误主机名、缺失 SNI 与握手超时。
 - SDK 注册监听时能收到已有可用连接，运行期断开、重连和失败事件无死锁完成。
-- 进入配网前等待 `mybot_stop()` 完成，产品仅在网络重新可用后启动 MyBot。
+- 进入配网前等待 `mybot_stop()` 完成，产品仅在网络重新可用后启动 SDK。
 - KV 在重置后存活，处理缺失与溢出，并保护凭据。
 - 使用对应 RTSA 软件包时，采集/播放通过所选 ptime 的 16 kHz 单声道 S16 测试（仓库附带
   Linux 软件包覆盖 60 ms）。

@@ -1,11 +1,11 @@
-# mybot
+# agent-studio-device-firmware
 
-[![CI](https://github.com/junlon2006/mybot/actions/workflows/ci.yml/badge.svg)](https://github.com/junlon2006/mybot/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/junlon2006/mybot)](LICENSE)
+[![CI](https://github.com/AgoraIO-Community/agent-studio-device-firmware/actions/workflows/ci.yml/badge.svg)](https://github.com/AgoraIO-Community/agent-studio-device-firmware/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/AgoraIO-Community/agent-studio-device-firmware)](LICENSE)
 
 **[English](README.md) | 简体中文**
 
-`mybot` 是面向设备端的跨平台 **AI 多模态交互 SDK**：让智能设备通过声网 Agora RTC 将
+`agent-studio-device-firmware` 是面向设备端的跨平台 **AI 多模态交互 SDK**：让智能设备通过声网 Agora RTC 将
 语音和可选的设备摄像头视频发送给云端 AI Agent，进行实时对话和视觉识别。平台/应用负责
 配网流程和 Wi-Fi 凭据；SDK 消费网络
 连接事件，并负责设备配对与认证、会话状态机、全双工语音交互（Agora RTSA 与 Agora AI
@@ -139,7 +139,7 @@ APSTA 配网；音频使用 ALSA `default` 设备；KV 数据默认写入当前�
 
 ## 集成到宿主工程
 
-推荐将仓库作为源码子模块引入。mybot 自身通过嵌套 submodule 依赖 AOSL，引入后先执行
+推荐将仓库作为源码子模块引入。SDK 自身通过嵌套 submodule 依赖 AOSL，引入后先执行
 `git submodule update --init --recursive` 初始化。宿主需要为目标架构准备匹配的 Agora RTSA
 头文件及共享库或静态库，并确保 AOSL 已支持目标平台。
 
@@ -170,14 +170,14 @@ target_link_libraries(device_firmware PRIVATE mybot::sdk)
 注册入口。完整实现顺序、最小代码、线程约束和验收清单见
 [docs/PORTING.md](docs/PORTING.md)。
 
-产品先完成配网，再启动 MyBot；重新进入配网前先停止 MyBot。SDK 负责的设备服务配对
+产品先完成配网，再启动 SDK；重新进入配网前先停止 SDK。SDK 负责的设备服务配对
 和会话与网络配网相互独立。集成顺序与代码示例见
 [PORTING：启动与停止](docs/PORTING.zh-CN.md#第-6-步启动与停止)，
 API 契约以 [mybot.h](include/mybot/mybot.h) 为准。
 
 仓库附带的 Linux RTSA 包是共享库。CMake 会为参考程序和测试设置构建目录运行路径；通过
 安装包集成的消费者必须自行部署 `libagora-rtc-sdk.so`，并通过安装 RPATH 或运行时加载器配置
-确保系统能够找到它。mybot 的 CMake 安装目标不会安装或再分发该依赖。
+确保系统能够找到它。SDK 的 CMake 安装目标不会安装或再分发该依赖。
 
 ## 构建配置
 
@@ -378,7 +378,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     camera["摄像头"] --> encoder["平台编码器"]
-    encoder -->|JPEG · H.264 · H.265| video["MyBot 视频 handler"]
+    encoder -->|JPEG · H.264 · H.265| video["SDK 视频处理"]
     video --> rtc_v["Agora RTC 视频上行"]
     rtc_v --> vision["云端 AI 视觉识别"]
 ```
@@ -389,7 +389,7 @@ flowchart LR
 ## 仓库结构
 
 ```text
-mybot/
+agent-studio-device-firmware/
 ├── include/mybot/          # SDK 公共头文件和平台接口规范
 ├── src/                    # 跨平台实现；internal/ 不属于公共 API
 ├── platforms/linux/        # Linux 参考实现（ALSA/stdin/file/console）
@@ -414,9 +414,9 @@ mybot/
 - [公共头文件](include/mybot/) — API 与平台接口契约的权威定义；本 README 保留项目概览
 - [docs/PORTING.md](docs/PORTING.md)（[简体中文](docs/PORTING.zh-CN.md)）— 新平台移植指南
   的集成流程与验收清单
-- [mybot-bk7258](https://github.com/junlon2006/mybot-bk7258) — BK7258 参考固件工程
-- [mybot-bk7259](https://github.com/junlon2006/mybot-bk7259) — BK7259 参考固件工程
-- [mybot-esp32](https://github.com/junlon2006/mybot-esp32) — ESP32 跨平台参考工程
+- [agora-r1-devkit](https://github.com/AgoraIO-Community/agora-r1-devkit) — BK7258 参考固件工程
+- [agora-r2-standard-devkit](https://github.com/AgoraIO-Community/agora-r2-standard-devkit) — BK7259 参考固件工程
+- [agora-esp32-devkit](https://github.com/AgoraIO-Community/agora-esp32-devkit) — ESP32 跨平台参考工程
 - [docs/EMBEDDED.md](docs/EMBEDDED.md)（[简体中文](docs/EMBEDDED.zh-CN.md)）— 面向 MCU
   集成者的体积、内存、线程/栈、时序、功耗与日志说明
 - [docs/RELEASING.md](docs/RELEASING.md)（[简体中文](docs/RELEASING.zh-CN.md)）— 版本发布流程

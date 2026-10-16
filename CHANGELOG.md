@@ -42,6 +42,8 @@ This project follows Semantic Versioning.
 
 ### Changed
 
+- Use agent-studio-device-firmware in documentation and link to the official AgoraIO-Community
+  firmware repositories.
 - Reuse consumer-owned PCM buffers during session flush, removing temporary drain allocations.
 - Increase the RTC queue capacity from 64 to 1000 pending calls while retaining nonblocking
   submission and the existing event handling.
@@ -64,8 +66,8 @@ This project follows Semantic Versioning.
 
 - Remove the duplicated `examples/bk725x` firmware project and `platforms/bk725x` adapters.
   BK platform code, board configuration, and firmware resources are maintained in the independent
-  [BK7258](https://github.com/junlon2006/mybot-bk7258) and
-  [BK7259](https://github.com/junlon2006/mybot-bk7259) projects. The SDK core and Linux reference
+  [BK7258](https://github.com/AgoraIO-Community/agora-r1-devkit) and
+  [BK7259](https://github.com/AgoraIO-Community/agora-r2-standard-devkit) projects. The SDK core and Linux reference
   implementation remain in this repository.
 
 ## [1.2.0] - 2026-09-15
@@ -84,7 +86,7 @@ This project follows Semantic Versioning.
 - Make the platform video ops table own the initial `min_bps` and `max_bps` video bitrate range.
   The SDK validates the platform values, configures RTSA's BWE range, and starts at their midpoint;
   only `MYBOT_VIDEO_MAX_FRAME_BYTES` remains a build-time SDK safety limit.
-- Disable remote video subscription because MyBot only sends device video upstream.
+- Disable remote video subscription because agent-studio-device-firmware only sends device video upstream.
 
 ### Compatibility
 
@@ -105,14 +107,14 @@ This project follows Semantic Versioning.
   device subscribes to the RTM channel matching the RTC channel before RTC join, and consumes the
   voiceprint status from the channel subscription callback while retaining P2P RTM callbacks.
 - Synchronize the BK725x adapter with the validated BK7258 integration: the application controller
-  now owns the APSTA/STA and MyBot lifecycle with a small polling loop, shared playback ownership is
-  explicit, and the dual LCD renders the voiceprint status indicator (red pending mark, green
+  now owns the APSTA/STA and agent-studio-device-firmware lifecycle with a small polling loop, shared
+  playback ownership is explicit, and the dual LCD renders the voiceprint status indicator (red pending mark, green
   success mark) on the conversation screen.
 
 ### Changed
 
-- Unify mybot-owned prompt playback behind the media pipeline, allowing a new prompt to replace
-  the current one, dropping buffered RTC downlink audio during prompt playback, and excluding
+- Unify prompt playback owned by agent-studio-device-firmware behind the media pipeline, allowing
+  a new prompt to replace the current one, dropping buffered RTC downlink audio during prompt playback, and excluding
   prompt PCM from the cloud AEC reference. Prompt data is drained by the playback consumer before
   replacement.
 - Use `AOSL_MPQ_FLAG_SIGP_EVENT` for the control and media worker queues so AOSL does not create
@@ -170,7 +172,7 @@ This project follows Semantic Versioning.
   synchronous startup checks for configuration-required ops.
 - Add the BK725x platform port under `platforms/bk725x` and synchronize the complete BK7258
   reference project under `examples/bk725x`, with the full firmware implementation maintained at
-  <https://github.com/junlon2006/mybot-bk7258>.
+  <https://github.com/AgoraIO-Community/agora-r1-devkit>.
 - Add `MYBOT_STATE_IN_CONVERSATION = 7` to the public `mybot_state_t` enum. After the device service
   accepts a conversation, `mybot_get_state()` reports this state until normal teardown returns to
   `MYBOT_STATE_READY`; `MYBOT_STATE_WIFI_DISCONNECTED` takes precedence during runtime connectivity
@@ -226,7 +228,7 @@ This project follows Semantic Versioning.
 
 - Replace the bundled x86_64 Linux Agora RTSA Lite static package with shared-library build
   `1267429` (`v1.10.1`) and accept either shared or static target libraries in CMake integrations.
-- Document the [mybot-esp32](https://github.com/junlon2006/mybot-esp32) cross-platform reference
+- Document the [agora-esp32-devkit](https://github.com/AgoraIO-Community/agora-esp32-devkit) cross-platform reference
   project in the porting guide and repository documentation.
 - Sync the complete BK725x platform adaptation with the BK7258 reference project, including
   descriptor-based registration and embedded TLS root verification.
@@ -235,8 +237,9 @@ This project follows Semantic Versioning.
 - **Breaking:** remove `mybot_request_exit()`; host applications stop directly after their own exit
   signal or condition is observed.
 - Align the Agora RTSA wrapper with the single-instance, one-call-at-a-time product model: initialize
-  RTSA once per mybot run, use one AOSL CAS lifecycle gate for callback, audio-send, and teardown
-  ordering, and create one connection per conversation, with explicit lifecycle and error logging.
+  RTSA once per agent-studio-device-firmware run, use one AOSL CAS lifecycle gate for callback,
+  audio-send, and teardown ordering, and create one connection per conversation, with explicit lifecycle
+  and error logging.
 - **Breaking:** remove legacy per-capability registration; the descriptor's version, capability, and
   name fields; and the name field from every ops table. Platform integrations must submit one complete
   descriptor whose non-NULL ops pointers are the sole declarations of supported platform functions.
@@ -266,8 +269,8 @@ This project follows Semantic Versioning.
 - Limit host clang-format and clang-tidy checks to the SDK core, Linux platform, Linux example, and
   tests; BK725x Armino sources are validated by the BK firmware build environment instead.
 - Update the pinned AOSL submodule to upstream commit `84e0860`, which adds reference-counted
-  `aosl_ctor()` / `aosl_dtor()` lifecycle management. mybot holds an application runtime reference
-  and releases it only after RTC callbacks, workers and buffers have been torn down.
+  `aosl_ctor()` / `aosl_dtor()` lifecycle management. agent-studio-device-firmware holds an application
+  runtime reference and releases it only after RTC callbacks, workers and buffers have been torn down.
 - Promote application informational logs to the AOSL NOTICE level, set the Linux example's
   runtime log threshold accordingly, and initialize the Agora RTSA SDK at its default NOTICE
   threshold, keeping application lifecycle messages visible while suppressing lower-priority

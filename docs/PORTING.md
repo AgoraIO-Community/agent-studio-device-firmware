@@ -1,14 +1,14 @@
-# Porting mybot to a new platform
+# Porting agent-studio-device-firmware to a new platform
 
 > [English](PORTING.md) | [简体中文](PORTING.zh-CN.md)
 
-This guide describes how to integrate mybot 1.2.0 into a product. Public API contracts,
+This guide describes how to integrate agent-studio-device-firmware 1.2.0 into a product. Public API contracts,
 including ownership and callback threading, are defined in
 [mybot.h](../include/mybot/mybot.h) and the
 [platform headers](../include/mybot/platform/). Public APIs and ABI follow Semantic Versioning.
 Platform code must include only headers under `include/mybot` and link `mybot::sdk`.
 
-mybot is designed to be portable to virtually any platform — Linux, an RTOS, or bare metal — as
+The SDK is designed to be portable to virtually any platform — Linux, an RTOS, or bare metal — as
 long as AOSL has a `CONFIG_PLATFORM` port for it and an Agora RTSA library exists for the target
 ABI. The integration flow below applies regardless of the host operating system or silicon vendor.
 
@@ -50,9 +50,9 @@ The following independent repositories maintain the MCU adapters, board configur
 and firmware builds. Use them directly for device integration; this SDK repository keeps the Linux
 reference implementation without duplicate MCU source trees.
 
-- [mybot-bk7258](https://github.com/junlon2006/mybot-bk7258) for BK7258;
-- [mybot-bk7259](https://github.com/junlon2006/mybot-bk7259) for BK7259;
-- [mybot-esp32](https://github.com/junlon2006/mybot-esp32) for ESP32.
+- [agora-r1-devkit](https://github.com/AgoraIO-Community/agora-r1-devkit) for BK7258;
+- [agora-r2-standard-devkit](https://github.com/AgoraIO-Community/agora-r2-standard-devkit) for BK7259;
+- [agora-esp32-devkit](https://github.com/AgoraIO-Community/agora-esp32-devkit) for ESP32.
 
 Use them to study target build integration, AOSL platform wiring, descriptor registration, and
 firmware lifecycle. When a reference project differs, use the SDK public headers as the authority
@@ -101,11 +101,11 @@ playback keeps working.
 
 Implement [mybot_wifi_ops_t](../include/mybot/platform/mybot_wifi.h) as a listener on the
 product's existing network manager and add it to the platform descriptor. Product provisioning,
-credential storage, and connection establishment are independent of MyBot. `init` attaches the SDK
+credential storage, and connection establishment are independent of the SDK. `init` attaches the SDK
 listener and reports the current usable connection; `destroy` detaches that listener without
 shutting down the product's network. Follow the header for event ordering and callback lifetime.
 
-Keep reporting runtime link loss and recovery while MyBot is running. The SDK pauses device-service
+Keep reporting runtime link loss and recovery while the SDK is running. The SDK pauses device-service
 requests while offline and resumes them after reconnection; a lost conversation is ended locally.
 Entering provisioning is a separate product action and follows the stop/start sequence in Step 6.
 The Linux adapter assumes the host network is already available and reports connected immediately;
@@ -245,7 +245,7 @@ frames must be complete JPEG images.
 
 `on_target_bitrate_changed()` receives RTSA's current uplink target in bits per second; the encoder
 should adjust its bitrate within its supported range and return promptly. `on_key_frame_request()` is
-optional and handles RTSA key-frame requests. MyBot sends one primary stream and explicitly disables
+optional and handles RTSA key-frame requests. The SDK sends one primary stream and explicitly disables
 remote video subscription.
 
 ## Step 4: Register one platform descriptor
@@ -298,8 +298,8 @@ consumed by `third_party/aosl` (e.g. `linux`, `esp32`); `MYBOT_BUILD_LINUX_PLATF
 bundled Linux reference implementations (`platforms/linux/`) and requires `CONFIG_PLATFORM=linux`. An MCU
 port keeps `MYBOT_BUILD_LINUX_PLATFORM=OFF`. A host may predefine an imported target named
 `agora-rtc-sdk`. Both source integration with `add_subdirectory()` and installed-package
-consumption via `find_package(mybot)` are supported. Source integration must initialize mybot's
-nested AOSL submodule (`git submodule update --init --recursive` in the mybot checkout).
+consumption via `find_package(mybot)` are supported. Source integration must initialize the SDK's
+nested AOSL submodule (`git submodule update --init --recursive` in the agent-studio-device-firmware checkout).
 
 ## Step 6: Start and stop
 
@@ -308,11 +308,11 @@ Run provisioning and SDK lifecycle control as separate product responsibilities:
 1. The product connects using saved credentials or completes its provisioning flow, then signals
    that the network is usable to the product control task.
 2. The product control task calls `mybot_start()`. The Wi-Fi adapter reports the existing connection,
-   allowing MyBot to start device-service pairing, authentication, and conversations.
+   allowing the SDK to start device-service pairing, authentication, and conversations.
 3. Before entering provisioning again, the product control task calls `mybot_stop()` and waits
-   for it to finish before handing shared devices to the provisioning flow. Start MyBot again
+   for it to finish before handing shared devices to the provisioning flow. Start the SDK again
    after usable connectivity returns. Provisioning prompts belong to that product flow;
-   SDK pairing-code announcements belong to MyBot.
+   SDK pairing-code announcements belong to the SDK.
 
 For the lifecycle API contract, see [mybot.h](../include/mybot/mybot.h). The following example runs
 on the product control task after network connectivity is ready:
@@ -336,7 +336,7 @@ start after the listener's first connected event. The historical `MYBOT_STATE_WI
 they do not mean the SDK is running provisioning. Do not call stop from a platform callback
 because it waits for workers and callbacks. `mybot_start()` acquires one application reference to the
 process-wide AOSL runtime and `mybot_stop()` releases that reference last, after workers, buffers
-and the RTC callback queues have been torn down. MyBot serializes RTSA lifecycle, state, and
+and the RTC callback queues have been torn down. The SDK serializes RTSA lifecycle, state, and
 vendor callback dispatch on a dedicated `rtc_mpq`; application callbacks must not re-enter the RTC
 API. The RTSA lifecycle is managed through
 `agora_rtc_init()` / `agora_rtc_fini()`. A host that uses AOSL directly must pair its own
@@ -352,7 +352,7 @@ Failure to queue a key, Wi-Fi, wake-word, or video-start event publishes an exit
 `mybot_is_running()` becomes false, and the product control task must call `mybot_stop()`.
 The callback does not tear down resources.
 
-For an ordinary temporary network outage, keep MyBot running and let the network manager reconnect
+For an ordinary temporary network outage, keep the SDK running and let the network manager reconnect
 with its existing credentials. The adapter reports the disconnect and subsequent usable connection;
 do not turn every link loss into a provisioning restart. The SDK ends the interrupted conversation
 and resumes device-service work after reconnect; starting a new conversation requires a new trigger.
@@ -434,7 +434,7 @@ host must ensure its include and library paths refer to that package.
 - HTTPS rejects an untrusted CA, expired certificate, wrong hostname, missing SNI and handshake timeout.
 - An already-connected network is reported when the SDK listener attaches; runtime disconnect,
   reconnect, and failure events complete without deadlock.
-- Entering provisioning waits for `mybot_stop()` to finish; the product restarts MyBot only after
+- Entering provisioning waits for `mybot_stop()` to finish; the product restarts the SDK only after
   network connectivity is usable again.
 - KV survives reset, handles not-found and overflow, and protects credentials.
 - Capture/playback pass 16 kHz mono S16 tests at each selected ptime with its matching RTSA package

@@ -1,7 +1,7 @@
 # Third-party notices
 
-The root Apache-2.0 license applies to mybot-maintained code unless a file states otherwise. It does
-not replace third-party terms. This file is informational, not legal advice.
+The root Apache-2.0 license applies to code maintained in agent-studio-device-firmware unless a file
+states otherwise. It does not replace third-party terms. This file is informational, not legal advice.
 
 ## AOSL
 
