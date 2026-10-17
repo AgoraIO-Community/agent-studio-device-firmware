@@ -75,12 +75,24 @@ bool mybot_device_command_parse(const mybot_json_t *root, mybot_device_command_t
     static const char *const command_names[] = {"type", "name", "params"};
     const mybot_json_t *command_fields[3];
     if (!read_fields(fields[6], command_names, 3, 7, command_fields) ||
-        !is_string(command_fields[0], "action") ||
-        !is_string(command_fields[1], "audio.set_volume")) {
+        !is_string(command_fields[0], "action")) {
         return false;
     }
-    static const char *const parameter_names[] = {"level"};
+    const char *parameter_name;
+    int minimum;
+    if (is_string(command_fields[1], "audio.set_volume")) {
+        command->type = MYBOT_DEVICE_COMMAND_SET_VOLUME;
+        parameter_name = "level";
+        minimum = 0;
+    } else if (is_string(command_fields[1], "audio.adjust_volume")) {
+        command->type = MYBOT_DEVICE_COMMAND_ADJUST_VOLUME;
+        parameter_name = "delta";
+        minimum = -100;
+    } else {
+        return false;
+    }
+    const char *const parameter_names[] = {parameter_name};
     const mybot_json_t *parameters[1];
     return read_fields(command_fields[2], parameter_names, 1, 1, parameters) &&
-           read_integer(parameters[0], 0, 100, &command->volume);
+           read_integer(parameters[0], minimum, 100, &command->value);
 }

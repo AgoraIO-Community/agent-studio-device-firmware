@@ -412,7 +412,8 @@ RTM UID 必须非空、长度小于 64 字节，并且只能包含 Agora 接受�
 ### MCP 设备命令
 
 MCP 工具调用及云端鉴权由服务端负责。SDK 仅接收一层云端封装内的 DeviceCommand v1
-`audio.set_volume` 命令：字段精确匹配 `object: "message.user"`、`data_type: "message"`，
+`audio.set_volume` 与 `audio.adjust_volume` 命令：字段精确匹配 `object: "message.user"`、
+`data_type: "message"`，
 且字符串 `content` 包含命令 JSON。这三个外层字段不可重复，其他外层元数据被忽略，不递归
 展开嵌套封装，也不接受裸命令。会话校验与去重使用内层命令 ID，外层 `message_id` 仅为传输
 元数据。P2P 和订阅频道消息共用解析器，命令在 `control_mpq` 执行。
@@ -428,9 +429,12 @@ MCP 工具调用及云端鉴权由服务端负责。SDK 仅接收一层云端封
 | Command type | Name | Params |
 | --- | --- | --- |
 | `action` | `audio.set_volume` | 整数 `level: 0..100` |
+| `action` | `audio.adjust_volume` | 整数 `delta: -100..100`；正数增大，负数减小 |
 
-音量命令复用按键调音路径：有效的硬件音量实现优先，否则由 SDK 应用软件增益。其他 MCP
-action 与 scene 均不支持。
+两种音量命令复用按键调音路径：有效的硬件音量实现优先，否则由 SDK 应用软件增益。相对调节
+在当前音量上加上 `delta`，结果限制在 0..100；零保持音量不变。例如 `delta: -10` 将 50
+调至 40，`delta: 10` 将 50 调至 60。command ID 仍在下述缓存中时，重复消息不会再次调节。
+其他 MCP action 与 scene 均不支持。
 
 执行时，SDK 将实际 RTM 发送方、频道消息的 channel 及正文 conversation ID 与当前会话
 完整匹配。每个会话的 FIFO 缓存保留最近接受的 16 个 command ID。仍在缓存中的重复 ID

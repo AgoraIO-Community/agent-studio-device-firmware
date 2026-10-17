@@ -2396,13 +2396,98 @@ static void test_cloud_message_envelope(void) {
     assert(read_counter(&s_last_media_volume) == 52);
 }
 
+static void test_cloud_adjust_volume(void) {
+    static const char captured[] =
+        "{\"message_id\": \"c14413c1\", \"object\": \"message.user\", \"content\": "
+        "\"{\\\"type\\\":\\\"device_command\\\",\\\"schema\\\":\\\"botstation.device-command\\\","
+        "\\\"version\\\":1,\\\"message_id\\\":\\\"msg_w3fLewic2AFydS6Glp0KpA\\\","
+        "\\\"command_id\\\":\\\"cmd_Wr_3v_X0o95dtLOCwwNlcQ\\\","
+        "\\\"conversation_id\\\":\\\"conv_dMWMDV-aC2tZ\\\","
+        "\\\"issued_at\\\":\\\"2026-10-17T10:00:59.972Z\\\","
+        "\\\"expires_at\\\":\\\"2026-10-17T10:01:09.972Z\\\","
+        "\\\"command\\\":{\\\"type\\\":\\\"action\\\",\\\"name\\\":\\\"audio.adjust_volume\\\","
+        "\\\"params\\\":{\\\"delta\\\":-10}}}\", \"data_type\": \"message\"}";
+    assert(sizeof(captured) - 1U == 490);
+    emit_device_command(NULL, "agent-uid", "cmd-adjust-base", "conversation-1", s_volume_command,
+                        NULL);
+    drain_device_commands();
+    assert(read_counter(&s_last_media_volume) == 50);
+    int sets_before = read_counter(&s_media_volume_set_calls);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", captured, sizeof(captured) - 1U);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_before);
+
+    const char *conversation = strstr(captured, "conv_dMWMDV-aC2tZ");
+    assert(conversation != NULL);
+    char matching[sizeof(captured)];
+    int length =
+        snprintf(matching, sizeof(matching), "%.*sconversation-1%s", (int)(conversation - captured),
+                 captured, conversation + strlen("conv_dMWMDV-aC2tZ"));
+    assert(length > 0 && (size_t)length < sizeof(matching));
+    emit_rtm_subscribe_data("rtc-channel", "other-uid", matching, (size_t)length);
+    emit_rtm_subscribe_data("bad-channel", "agent-uid", matching, (size_t)length);
+    emit_rtm_data("other-uid", matching, (size_t)length);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_before);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", matching, (size_t)length);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_before + 1);
+    assert(read_counter(&s_last_media_volume) == 40);
+
+    /* A repeated relative command must not reduce the volume twice across routes. */
+    emit_rtm_data("agent-uid", matching, (size_t)length);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", matching, (size_t)length);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_before + 1);
+    assert(read_counter(&s_last_media_volume) == 40);
+
+    static const struct {
+        int delta;
+        int expected;
+    } adjustments[] = {
+        {-10, 30},  {10, 40},  {-100, 0}, {-10, 0}, {10, 10},
+        {100, 100}, {10, 100}, {-10, 90}, {0, 90},
+    };
+    for (size_t i = 0; i < sizeof(adjustments) / sizeof(adjustments[0]); ++i) {
+        char id[32];
+        char command[96];
+        int id_length = snprintf(id, sizeof(id), "cmd-adjust-sequence-%zu", i);
+        int command_length = snprintf(
+            command, sizeof(command),
+            "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":%d}}",
+            adjustments[i].delta);
+        assert(id_length > 0 && (size_t)id_length < sizeof(id));
+        assert(command_length > 0 && (size_t)command_length < sizeof(command));
+        emit_device_command(i % 2 ? "rtc-channel" : NULL, "agent-uid", id, "conversation-1",
+                            command, NULL);
+        drain_device_commands();
+        assert(read_counter(&s_media_volume_set_calls) == sets_before + 2 + (int)i);
+        assert(read_counter(&s_last_media_volume) == adjustments[i].expected);
+    }
+    /* Absolute volume remains supported and shares the same deduplication cache. */
+    emit_device_command(NULL, "agent-uid", "cmd-adjust-restore", "conversation-1", s_volume_command,
+                        NULL);
+    drain_device_commands();
+    int sets_after_restore = read_counter(&s_media_volume_set_calls);
+    assert(sets_after_restore == sets_before + 11);
+    assert(read_counter(&s_last_media_volume) == 50);
+    emit_device_command(
+        "rtc-channel", "agent-uid", "cmd-adjust-restore", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-10}}", NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_after_restore);
+    assert(read_counter(&s_last_media_volume) == 50);
+}
+
 static void test_device_commands(void) {
     test_cloud_message_envelope();
+    test_cloud_adjust_volume();
     int volume_calls_before = read_counter(&s_media_volume_set_calls);
     int pulses_before = read_counter(&s_emotion_pulses);
     /* Unsupported commands and invalid levels must not consume the valid ID. */
     static const char *const unsupported[] = {
-        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-15}}",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-101}}",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":101}}",
         "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":true}}",
         "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{}}",
         "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":101}}",

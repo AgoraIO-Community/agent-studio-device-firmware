@@ -10,6 +10,8 @@
 #include <string.h>
 
 #define VALID_ACTION "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":50}}"
+#define VALID_ADJUST                                                                               \
+    "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-10}}"
 static mybot_json_t *fixture(const char *command, const char *extra) {
     char text[2048];
     int length = snprintf(text, sizeof(text),
@@ -34,7 +36,12 @@ static bool parse(const char *command, mybot_device_command_t *result) {
 static void test_valid_commands(void) {
     mybot_device_command_t command;
     assert(parse(VALID_ACTION, &command));
-    assert(command.volume == 50);
+    assert(command.type == MYBOT_DEVICE_COMMAND_SET_VOLUME && command.value == 50);
+    assert(strcmp(command.message_id, "msg-1") == 0);
+    assert(strcmp(command.command_id, "cmd-1") == 0);
+    assert(strcmp(command.conversation_id, "conv-1") == 0);
+    assert(parse(VALID_ADJUST, &command));
+    assert(command.type == MYBOT_DEVICE_COMMAND_ADJUST_VOLUME && command.value == -10);
     assert(strcmp(command.message_id, "msg-1") == 0);
     assert(strcmp(command.command_id, "cmd-1") == 0);
     assert(strcmp(command.conversation_id, "conv-1") == 0);
@@ -74,12 +81,53 @@ static void test_parameter_boundaries(void) {
     }
 }
 
+static void test_relative_parameter_boundaries(void) {
+    static const struct {
+        const char *value;
+        bool valid;
+        int expected;
+    } cases[] = {
+        {"-10", true, -10},
+        {"10", true, 10},
+        {"0", true, 0},
+        {"-100", true, -100},
+        {"100", true, 100},
+        {"-10.0", true, -10},
+        {"-1e1", true, -10},
+        {"-101", false, 0},
+        {"101", false, 0},
+        {"-0.5", false, 0},
+        {"0.5", false, 0},
+        {"\"-10\"", false, 0},
+        {"true", false, 0},
+        {"false", false, 0},
+        {"null", false, 0},
+        {"{}", false, 0},
+        {"[]", false, 0},
+        {"9223372036854775807", false, 0},
+        {"-9223372036854775808", false, 0},
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        char action[192];
+        int length = snprintf(action, sizeof(action),
+                              "{\"type\":\"action\",\"name\":\"audio.adjust_volume\","
+                              "\"params\":{\"delta\":%s}}",
+                              cases[index].value);
+        assert(length > 0 && (size_t)length < sizeof(action));
+        mybot_device_command_t command;
+        assert(parse(action, &command) == cases[index].valid);
+        if (cases[index].valid) {
+            assert(command.type == MYBOT_DEVICE_COMMAND_ADJUST_VOLUME);
+            assert(command.value == cases[index].expected);
+        }
+    }
+}
+
 static void test_invalid_commands(void) {
     static const char *const cases[] = {
         "{}",
         "[]",
         "{\"type\":\"action\",\"name\":\"audio.unknown\",\"params\":{}}",
-        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":10}}",
         "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":true}}",
         "{\"type\":\"ACTION\",\"name\":\"audio.set_volume\",\"params\":{\"level\":50}}",
         "{\"type\":\"action\",\"name\":\"Audio.set_volume\",\"params\":{\"level\":50}}",
@@ -92,6 +140,17 @@ static void test_invalid_commands(void) {
         ("{\"type\":\"action\",\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{"
          "\"level\":50}}"),
         "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":50},\"extra\":0}",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{}}",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":[]}",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":null}",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"level\":10}}",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"delta\":10}}",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"Delta\":10}}",
+        "{\"type\":\"action\",\"name\":\"Audio.adjust_volume\",\"params\":{\"delta\":10}}",
+        ("{\"type\":\"action\",\"name\":\"audio.adjust_volume\","
+         "\"params\":{\"delta\":10,\"delta\":20}}"),
+        ("{\"type\":\"action\",\"name\":\"audio.adjust_volume\","
+         "\"params\":{\"delta\":10,\"extra\":0}}"),
         "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{}}",
         "{\"type\":\"scene\",\"name\":\"audio.set_volume\",\"params\":{}}",
         "{\"type\":\"action\",\"name\":\"emotion.happy\",\"params\":{}}",
@@ -203,7 +262,7 @@ static void test_ignored_timestamps(void) {
     for (size_t index = 0; index < sizeof(timestamps) / sizeof(timestamps[0]); index++) {
         mybot_json_t *root = fixture(VALID_ACTION, timestamps[index]);
         assert(mybot_device_command_parse(root, &command));
-        assert(command.volume == 50);
+        assert(command.type == MYBOT_DEVICE_COMMAND_SET_VOLUME && command.value == 50);
         mybot_json_delete(root);
     }
     static const char *const repeated[] = {
@@ -244,19 +303,27 @@ static void test_free(void *ptr) {
 static void test_allocation_and_ownership(void) {
     const mybot_json_hooks_t hooks = {.malloc_fn = test_malloc, .free_fn = test_free};
     assert(mybot_json_init_hooks(&hooks) == 0);
-    mybot_json_t *root = fixture(VALID_ACTION, "");
-    size_t allocations_before = s_allocation_count;
-    s_fail_allocation = true;
-    mybot_device_command_t command;
-    assert(mybot_device_command_parse(root, &command));
-    assert(s_allocation_count == allocations_before);
-    mybot_json_delete(root);
-    assert(s_live_allocations == 0);
-    assert(strcmp(command.message_id, "msg-1") == 0);
-    assert(strcmp(command.command_id, "cmd-1") == 0);
-    assert(strcmp(command.conversation_id, "conv-1") == 0);
-    assert(command.volume == 50);
-    s_fail_allocation = false;
+    static const struct {
+        const char *action;
+        mybot_device_command_type_t type;
+        int value;
+    } commands[] = {{VALID_ACTION, MYBOT_DEVICE_COMMAND_SET_VOLUME, 50},
+                    {VALID_ADJUST, MYBOT_DEVICE_COMMAND_ADJUST_VOLUME, -10}};
+    for (size_t index = 0; index < sizeof(commands) / sizeof(commands[0]); ++index) {
+        mybot_json_t *root = fixture(commands[index].action, "");
+        size_t allocations_before = s_allocation_count;
+        s_fail_allocation = true;
+        mybot_device_command_t command;
+        assert(mybot_device_command_parse(root, &command));
+        assert(s_allocation_count == allocations_before);
+        mybot_json_delete(root);
+        assert(s_live_allocations == 0);
+        assert(strcmp(command.message_id, "msg-1") == 0);
+        assert(strcmp(command.command_id, "cmd-1") == 0);
+        assert(strcmp(command.conversation_id, "conv-1") == 0);
+        assert(command.type == commands[index].type && command.value == commands[index].value);
+        s_fail_allocation = false;
+    }
     assert(mybot_json_init_hooks(NULL) == 0);
 }
 
@@ -264,6 +331,7 @@ int main(void) {
     aosl_ctor();
     test_valid_commands();
     test_parameter_boundaries();
+    test_relative_parameter_boundaries();
     test_invalid_commands();
     test_envelope();
     test_id_bounds();
