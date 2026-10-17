@@ -14,6 +14,7 @@
 #include "mybot_device_lifecycle.h"
 #include "mybot_key_internal.h"
 #include "mybot_kv_store_internal.h"
+#include "mybot_json.h"
 #include "mybot_lcd_internal.h"
 #include "mybot_platform_registry.h"
 #include "mybot_agora_rtc.h"
@@ -269,7 +270,6 @@ static int s_conversation_ended_notifications;
 static int s_media_volume_set_calls;
 static int s_last_media_volume;
 static int s_emotion_pulses;
-static uint32_t s_last_emotion_indicators;
 static char s_renewed_token[512];
 
 static size_t s_sent_lengths[TEST_MAX_SENT_FRAMES];
@@ -774,16 +774,41 @@ static void drain_device_commands(void) {
                          0) == 0);
 }
 
-static void emit_device_command(const char *channel, const char *sender, const char *id,
-                                const char *conversation, const char *command,
-                                const char *metadata) {
-    char message[1024];
-    int length = snprintf(message, sizeof(message),
+static size_t make_cloud_message(char *message, size_t capacity, const char *fields,
+                                 const char *content_key, const char *content);
+
+static size_t make_device_command(char *message, size_t capacity, const char *id,
+                                  const char *conversation, const char *command,
+                                  const char *metadata) {
+    int length = snprintf(message, capacity,
                           "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\","
                           "\"version\":1,\"message_id\":\"msg-%s\",\"command_id\":\"%s\","
                           "\"conversation_id\":\"%s\",\"command\":%s%s}",
                           id, id, conversation, command, metadata ? metadata : "");
-    assert(length > 0 && (size_t)length < sizeof(message));
+    assert(length > 0 && (size_t)length < capacity);
+    return (size_t)length;
+}
+
+static void emit_bare_device_command(const char *channel, const char *sender, const char *id,
+                                     const char *conversation, const char *command) {
+    char message[768];
+    size_t length = make_device_command(message, sizeof(message), id, conversation, command, NULL);
+    if (channel) {
+        emit_rtm_subscribe_data(channel, sender, message, length);
+    } else {
+        emit_rtm_data(sender, message, length);
+    }
+}
+
+static void emit_device_command(const char *channel, const char *sender, const char *id,
+                                const char *conversation, const char *command,
+                                const char *metadata) {
+    char content[768];
+    make_device_command(content, sizeof(content), id, conversation, command, metadata);
+    char message[1024];
+    size_t length = make_cloud_message(message, sizeof(message),
+                                       "\"object\":\"message.user\",\"data_type\":\"message\"",
+                                       "content", content);
     if (channel) {
         emit_rtm_subscribe_data(channel, sender, message, (size_t)length);
     } else {
@@ -791,8 +816,8 @@ static void emit_device_command(const char *channel, const char *sender, const c
     }
 }
 
-static const char s_happy_command[] =
-    "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{}}";
+static const char s_volume_command[] =
+    "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":50}}";
 
 bool mybot_platform_registry_is_registered(void) {
     return s_platform_registered;
@@ -833,7 +858,6 @@ int mybot_lcd_show_content(mybot_lcd_t *lcd, const mybot_lcd_content_t *content)
     s_last_lcd_content = *content;
     if (content->indicators & MYBOT_LCD_INDICATOR_EMOTION_MASK) {
         s_emotion_pulses++;
-        s_last_emotion_indicators = content->indicators;
     }
     mock_unlock();
     return 0;
@@ -2132,172 +2156,319 @@ static void test_control_queue_failures(const mybot_config_t *config) {
 }
 #endif
 
-static void test_device_commands(void) {
-    int pulses_before = read_counter(&s_emotion_pulses);
+static size_t s_envelope_alloc_calls;
+static size_t s_envelope_alloc_fail_at;
+static size_t s_envelope_alloc_live;
+
+static void *envelope_json_malloc(size_t size) {
+    if (++s_envelope_alloc_calls == s_envelope_alloc_fail_at) {
+        return NULL;
+    }
+    void *pointer = aosl_hal_malloc(size);
+    if (pointer) {
+        ++s_envelope_alloc_live;
+    }
+    return pointer;
+}
+
+static void envelope_json_free(void *pointer) {
+    if (pointer) {
+        assert(s_envelope_alloc_live > 0);
+        --s_envelope_alloc_live;
+    }
+    aosl_hal_free(pointer);
+}
+
+static void test_cloud_message_allocation_failures(const char *message, size_t length) {
+    /* This test's RTM parsing runs synchronously on the caller. No JSON trees
+     * remain live while the allocator hooks are changed. */
+    mybot_json_hooks_t hooks = {.malloc_fn = envelope_json_malloc, .free_fn = envelope_json_free};
+    s_envelope_alloc_calls = 0;
+    s_envelope_alloc_fail_at = 0;
+    assert(mybot_json_init_hooks(&hooks) == 0);
+    mybot_json_t *outer = mybot_json_parse(message);
+    assert(outer != NULL);
+    size_t outer_allocations = s_envelope_alloc_calls;
+    mybot_json_delete(outer);
+    assert(s_envelope_alloc_live == 0);
+
+    int sets_before = read_counter(&s_media_volume_set_calls);
+    const size_t failures[] = {1, outer_allocations + 1};
+    for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i) {
+        s_envelope_alloc_calls = 0;
+        s_envelope_alloc_fail_at = failures[i];
+        emit_rtm_data("agent-uid", message, length);
+        assert(s_envelope_alloc_calls == failures[i]);
+        assert(s_envelope_alloc_live == 0);
+        drain_device_commands();
+        assert(read_counter(&s_media_volume_set_calls) == sets_before);
+    }
+    assert(mybot_json_init_hooks(NULL) == 0);
+}
+
+static size_t make_cloud_message(char *message, size_t capacity, const char *fields,
+                                 const char *content_key, const char *content) {
+    int prefix = snprintf(message, capacity, "{%s,\"%s\":\"", fields, content_key);
+    assert(prefix > 0 && (size_t)prefix < capacity);
+    size_t length = (size_t)prefix;
+    for (const char *p = content; *p; ++p) {
+        assert((unsigned char)*p >= 0x20);
+        assert(length + 4 < capacity);
+        if (*p == '\\' || *p == '"') {
+            message[length++] = '\\';
+        }
+        message[length++] = *p;
+    }
+    message[length++] = '"';
+    message[length++] = '}';
+    message[length] = '\0';
+    return length;
+}
+
+static void emit_cloud_message(const char *channel, const char *fields, const char *content_key,
+                               const char *content) {
+    char message[1024];
+    size_t length = make_cloud_message(message, sizeof(message), fields, content_key, content);
+    if (channel) {
+        emit_rtm_subscribe_data(channel, "agent-uid", message, length);
+    } else {
+        emit_rtm_data("agent-uid", message, length);
+    }
+}
+
+static void test_cloud_message_envelope(void) {
+    /* The exact RTM payload captured from the device log, including its spacing. */
+    static const char captured[] =
+        "{\"message_id\": \"ace5db6a\", \"object\": \"message.user\", \"content\": "
+        "\"{\\\"type\\\":\\\"device_command\\\",\\\"schema\\\":\\\"botstation.device-command\\\","
+        "\\\"version\\\":1,\\\"message_id\\\":\\\"msg_2qGHNLswfXeT-vrRdbieZw\\\","
+        "\\\"command_id\\\":\\\"cmd_oeNNZ1uRv7vDgtrnpu6e5A\\\","
+        "\\\"conversation_id\\\":\\\"conv_59ld9dYHhZfF\\\","
+        "\\\"issued_at\\\":\\\"2026-10-17T08:36:24.039Z\\\","
+        "\\\"expires_at\\\":\\\"2026-10-17T08:36:34.039Z\\\","
+        "\\\"command\\\":{\\\"type\\\":\\\"action\\\",\\\"name\\\":\\\"audio.set_volume\\\","
+        "\\\"params\\\":{\\\"level\\\":50}}}\", \"data_type\": \"message\"}";
+    assert(sizeof(captured) - 1U == 486);
     int volume_calls_before = read_counter(&s_media_volume_set_calls);
-    /* Rejected deliveries must neither execute nor consume the valid command's ID. */
-    emit_device_command("rtc-channel", "other-uid", "cmd-happy", "conversation-1", s_happy_command,
-                        NULL);
-    emit_device_command("bad-channel", "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
-                        NULL);
-    emit_device_command("", "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL);
-    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-2", s_happy_command, NULL);
-    emit_device_command(
-        NULL, "other-uid", "cmd-volume", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":20}}", NULL);
-    emit_device_command(
-        NULL, "agent-uid", "cmd-volume", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":101}}", NULL);
-    emit_device_command(
-        NULL, "agent-uid", "cmd-emotion-params", "conversation-1",
-        "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{\"intensity\":0.5}}", NULL);
-    emit_device_command(NULL, "agent-uid", "cmd-happy\\u0000suffix", "conversation-1",
-                        s_happy_command, NULL);
-    /* A valid envelope padded beyond the RTM bound must not bypass the length check. */
-    const char envelope[] =
-        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
-        "\"message_id\":\"msg-malformed\",\"command_id\":\"cmd-malformed\","
-        "\"conversation_id\":\"conversation-1\","
-        "\"command\":{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{}}}";
-    char malformed[1025];
-    memset(malformed, ' ', sizeof(malformed));
-    memcpy(malformed, envelope, sizeof(envelope) - 1U);
-    emit_rtm_data("agent-uid", malformed, sizeof(malformed));
-    malformed[sizeof(envelope)] = '\0';
-    emit_rtm_subscribe_data("rtc-channel", "agent-uid", malformed, sizeof(envelope) + 1U);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", captured, sizeof(captured) - 1U);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before);
     assert(read_counter(&s_media_volume_set_calls) == volume_calls_before);
 
-    /* Timestamp metadata does not gate execution, even for past, future or reversed windows. */
-    emit_device_command(NULL, "agent-uid", "cmd-past", "conversation-1", s_happy_command,
-                        ",\"issued_at\":\"1970-01-01T00:00:00Z\","
-                        "\"expires_at\":\"1970-01-01T00:00:01Z\"");
-    emit_device_command(NULL, "agent-uid", "cmd-future", "conversation-1", s_happy_command,
-                        ",\"issued_at\":\"9999-01-01T00:00:00Z\","
-                        "\"expires_at\":\"9999-01-01T00:00:01Z\"");
-    emit_device_command(NULL, "agent-uid", "cmd-reversed", "conversation-1", s_happy_command,
-                        ",\"issued_at\":\"9999-01-01T00:00:00Z\","
-                        "\"expires_at\":\"1970-01-01T00:00:00Z\"");
+    /* Only the captured conversation ID changes to match the live stub session. */
+    const char *conversation = strstr(captured, "conv_59ld9dYHhZfF");
+    assert(conversation != NULL);
+    char matching[sizeof(captured)];
+    int length =
+        snprintf(matching, sizeof(matching), "%.*sconversation-1%s", (int)(conversation - captured),
+                 captured, conversation + strlen("conv_59ld9dYHhZfF"));
+    assert(length > 0 && (size_t)length < sizeof(matching));
+    emit_rtm_subscribe_data("rtc-channel", "other-uid", matching, (size_t)length);
+    emit_rtm_subscribe_data("bad-channel", "agent-uid", matching, (size_t)length);
+    emit_rtm_data("other-uid", matching, (size_t)length);
+    /* A legal inner command is accepted only inside the actual cloud envelope. */
+    emit_bare_device_command(NULL, "agent-uid", "cmd_oeNNZ1uRv7vDgtrnpu6e5A", "conversation-1",
+                             s_volume_command);
+    emit_bare_device_command("rtc-channel", "agent-uid", "cmd_oeNNZ1uRv7vDgtrnpu6e5A",
+                             "conversation-1", s_volume_command);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 3);
-    pulses_before += 3;
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before);
+    test_cloud_message_allocation_failures(matching, (size_t)length);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", matching, (size_t)length);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 1);
+    assert(read_counter(&s_last_media_volume) == 50);
 
-    /* Two RTM routes share one command-ID cache, but a new ID retriggers the same expression. */
-    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL);
+    /* Both RTM delivery routes share the inner command ID cache. */
+    emit_rtm_data("agent-uid", matching, (size_t)length);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", matching, (size_t)length);
+    emit_device_command(
+        NULL, "agent-uid", "cmd_oeNNZ1uRv7vDgtrnpu6e5A", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":50}}", NULL);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 1);
-    emit_device_command("rtc-channel", "agent-uid", "cmd-happy", "conversation-1", s_happy_command,
-                        NULL);
-    drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 1);
-    emit_device_command("rtc-channel", "agent-uid", "cmd-happy-next", "conversation-1",
-                        s_happy_command, NULL);
-    drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 2);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 1);
 
-    static const struct {
-        const char *name;
-        const char *id;
-        mybot_lcd_indicator_t indicator;
-    } emotions[] = {
-        {"sad", "cmd-sad", MYBOT_LCD_INDICATOR_SAD},
-        {"angry", "cmd-angry", MYBOT_LCD_INDICATOR_ANGRY},
-        {"surprised", "cmd-surprised", MYBOT_LCD_INDICATOR_SURPRISED},
+    static const char fields[] =
+        "\"message_id\":\"ace5db6a\",\"object\":\"message.user\",\"data_type\":\"message\"";
+    static const char inner[] =
+        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-after-invalid\","
+        "\"command_id\":\"cmd-envelope-after-invalid\",\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}}"
+        "}";
+    static const char *const invalid_fields[] = {
+        "\"object\":\"message.assistant\",\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"data_type\":\"text\"",
+        "\"object\":\"message.user\"",
+        "\"data_type\":\"message\"",
+        "\"Object\":\"message.user\",\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"Data_type\":\"message\"",
+        "\"object\":null,\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"data_type\":1",
+        "\"object\":\"message.user\",\"object\":\"message.user\",\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"data_type\":\"message\",\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"data_type\":\"message\",\"content\":\"ignored\"",
+        "\"object\":\"message.user\\u0000suffix\",\"data_type\":\"message\"",
     };
-    for (size_t index = 0; index < sizeof(emotions) / sizeof(emotions[0]); ++index) {
-        char action[128];
-        int length = snprintf(action, sizeof(action),
-                              "{\"type\":\"scene\",\"name\":\"emotion.%s\",\"params\":{}}",
-                              emotions[index].name);
-        assert(length > 0 && (size_t)length < sizeof(action));
-        emit_device_command("rtc-channel", "agent-uid", emotions[index].id, "conversation-1",
-                            action, NULL);
-        drain_device_commands();
-        assert(read_counter(&s_emotion_pulses) == pulses_before + 3 + (int)index);
-        mock_lock();
-        assert(s_last_emotion_indicators ==
-               (MYBOT_LCD_INDICATOR_VP_REGISTERED | MYBOT_LCD_INDICATOR_SPEAKING |
-                emotions[index].indicator));
-        mock_unlock();
+    for (size_t i = 0; i < sizeof(invalid_fields) / sizeof(invalid_fields[0]); ++i) {
+        emit_cloud_message("rtc-channel", invalid_fields[i], "content", inner);
     }
-    const char speaking[] = "{\"event_type\":\"state.speaking\",\"payload\":{\"value\":true}}";
-    emit_rtm_subscribe_data("rtc-channel", "agent-uid", speaking, sizeof(speaking) - 1);
+    emit_cloud_message(NULL, fields, "Content", inner);
+    static const char *const invalid_content[] = {
+        "",         "{",
+        "[]",       "null",
+        "true",     "51",
+        "\"text\"", "{\"event_type\":\"state.listening\",\"payload\":{\"value\":true}}",
+    };
+    for (size_t i = 0; i < sizeof(invalid_content) / sizeof(invalid_content[0]); ++i) {
+        emit_cloud_message(NULL, fields, "content", invalid_content[i]);
+    }
+    char nested[1024];
+    make_cloud_message(nested, sizeof(nested), fields, "content", inner);
+    emit_cloud_message("rtc-channel", fields, "content", nested);
+    static const char *const wrong_content_types[] = {
+        "{\"object\":\"message.user\",\"data_type\":\"message\"}",
+        "{\"object\":\"message.user\",\"data_type\":\"message\",\"content\":null}",
+        "{\"object\":\"message.user\",\"data_type\":\"message\",\"content\":51}",
+        "{\"object\":\"message.user\",\"data_type\":\"message\",\"content\":{}}",
+    };
+    for (size_t i = 0; i < sizeof(wrong_content_types) / sizeof(wrong_content_types[0]); ++i) {
+        emit_rtm_data("agent-uid", wrong_content_types[i], strlen(wrong_content_types[i]));
+    }
+    /* The outer string decodes to an escaped NUL in the inner JSON. Reject
+     * that decoded escape and leave the legitimate command ID available. */
+    static const char inner_nul[] =
+        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-after-invalid\","
+        "\"command_id\":\"cmd-envelope-after-invalid\\u0000suffix\","
+        "\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}}"
+        "}";
+    emit_cloud_message(NULL, fields, "content", inner_nul);
+    static const char duplicate_command[] =
+        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-after-invalid\","
+        "\"command_id\":\"cmd-envelope-after-invalid\",\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}},"
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}}"
+        "}";
+    emit_cloud_message("rtc-channel", fields, "content", duplicate_command);
+    static const char uppercase_inner_key[] =
+        "{\"Type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-after-invalid\","
+        "\"command_id\":\"cmd-envelope-after-invalid\",\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}}"
+        "}";
+    emit_cloud_message(NULL, fields, "content", uppercase_inner_key);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 5);
+    assert(mybot_get_state() == MYBOT_STATE_IN_CONVERSATION && mybot_is_running());
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 1);
+    assert(read_counter(&s_last_media_volume) == 50);
     mock_lock();
-    assert(s_last_lcd_content.indicators ==
-           (MYBOT_LCD_INDICATOR_VP_REGISTERED | MYBOT_LCD_INDICATOR_SPEAKING));
+    assert(!(s_last_lcd_content.indicators & MYBOT_LCD_INDICATOR_LISTENING));
     mock_unlock();
 
-    emit_device_command(
-        NULL, "agent-uid", "cmd-volume", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":40}}", NULL);
+    /* Rejections do not consume the inner ID or the outer metadata message ID. */
+    emit_cloud_message(NULL, fields, "content", inner);
     drain_device_commands();
-    assert(read_counter(&s_last_media_volume) == 40);
-    const char adjust[] =
-        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-15}}";
-    emit_device_command("rtc-channel", "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 2);
+    assert(read_counter(&s_last_media_volume) == 51);
+    emit_cloud_message("rtc-channel", fields, "content", inner);
     drain_device_commands();
-    assert(read_counter(&s_last_media_volume) == 25);
-    int sets_after_adjust = read_counter(&s_media_volume_set_calls);
-    emit_device_command(NULL, "agent-uid", "cmd-adjust", "conversation-1", adjust, NULL);
-    drain_device_commands();
-    assert(read_counter(&s_media_volume_set_calls) == sets_after_adjust);
-    assert(read_counter(&s_last_media_volume) == 25);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 2);
 
-    /* Mute changes playback PCM only; the running capture/send workers still upload the mic. */
-    emit_device_command(
-        NULL, "agent-uid", "cmd-mute", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":true}}", NULL);
+    /* The transport bound counts the entire encoded envelope, including metadata. */
+    static const char boundary_inner[] =
+        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-boundary\",\"command_id\":\"cmd-envelope-boundary\","
+        "\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":52}}"
+        "}";
+    char boundary[1025];
+    size_t boundary_length =
+        make_cloud_message(boundary, sizeof(boundary), fields, "content", boundary_inner);
+    memset(boundary + boundary_length, ' ', sizeof(boundary) - boundary_length);
+    emit_rtm_data("agent-uid", boundary, sizeof(boundary));
     drain_device_commands();
-    int16_t pcm[TEST_FRAME_SAMPLES];
-    for (int index = 0; index < TEST_FRAME_SAMPLES; ++index) {
-        pcm[index] = 1234;
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 2);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", boundary, sizeof(boundary) - 1U);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 3);
+    assert(read_counter(&s_last_media_volume) == 52);
+}
+
+static void test_device_commands(void) {
+    test_cloud_message_envelope();
+    int volume_calls_before = read_counter(&s_media_volume_set_calls);
+    int pulses_before = read_counter(&s_emotion_pulses);
+    /* Unsupported commands and invalid levels must not consume the valid ID. */
+    static const char *const unsupported[] = {
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-15}}",
+        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":true}}",
+        "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{}}",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":101}}",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":-1}}",
+    };
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); ++i) {
+        emit_device_command("rtc-channel", "agent-uid", "cmd-volume", "conversation-1",
+                            unsupported[i], NULL);
     }
-    int writes_before = read_counter(&s_playback_write_calls);
-    int sends_before = read_counter(&s_rtc_send_calls);
-    emit_remote_audio(pcm, sizeof(pcm));
-    assert(wait_for_counter(&s_playback_write_calls, writes_before + 1, 1000));
-    assert(read_counter(&s_last_playback_sample) == 0);
-    assert(wait_for_counter(&s_rtc_send_calls, sends_before + 1, 1000));
-    emit_device_command(
-        "rtc-channel", "agent-uid", "cmd-unmute", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":false}}", NULL);
+    emit_device_command(NULL, "other-uid", "cmd-volume", "conversation-1", s_volume_command, NULL);
+    emit_device_command("", "agent-uid", "cmd-volume", "conversation-1", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-volume", "conversation-2", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-volume\\u0000suffix", "conversation-1",
+                        s_volume_command, NULL);
     drain_device_commands();
-    writes_before = read_counter(&s_playback_write_calls);
-    emit_remote_audio(pcm, sizeof(pcm));
-    assert(wait_for_counter(&s_playback_write_calls, writes_before + 1, 1000));
-    assert(read_counter(&s_last_playback_sample) == 1234);
-    assert(read_counter(&s_last_media_volume) == 25);
-    emit_device_command(
-        NULL, "agent-uid", "cmd-volume-restore", "conversation-1",
-        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":100}}", NULL);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before);
+    assert(read_counter(&s_emotion_pulses) == pulses_before);
+
+    /* Timestamp metadata does not gate volume execution. */
+    const char *const metadata[] = {
+        ",\"issued_at\":\"1970-01-01T00:00:00Z\",\"expires_at\":\"1970-01-01T00:00:01Z\"",
+        ",\"issued_at\":\"9999-01-01T00:00:00Z\",\"expires_at\":\"9999-01-01T00:00:01Z\"",
+        ",\"issued_at\":\"9999-01-01T00:00:00Z\",\"expires_at\":\"1970-01-01T00:00:00Z\"",
+    };
+    for (size_t i = 0; i < sizeof(metadata) / sizeof(metadata[0]); ++i) {
+        char id[32];
+        int length = snprintf(id, sizeof(id), "cmd-volume-time-%zu", i);
+        assert(length > 0 && (size_t)length < sizeof(id));
+        emit_device_command(NULL, "agent-uid", id, "conversation-1", s_volume_command, metadata[i]);
+    }
     drain_device_commands();
-    assert(read_counter(&s_last_media_volume) == 100);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 3);
+
+    emit_device_command(NULL, "agent-uid", "cmd-volume", "conversation-1", s_volume_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 4);
+    assert(read_counter(&s_last_media_volume) == 50);
+    emit_device_command("rtc-channel", "agent-uid", "cmd-volume", "conversation-1",
+                        s_volume_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 4);
 
     /* The last 16 accepted IDs remain deduplicated while new IDs replace the oldest. */
     for (int index = 0; index < 21; ++index) {
         char id[32];
         assert(snprintf(id, sizeof(id), "cmd-fill-%d", index) > 0);
-        emit_device_command(NULL, "agent-uid", id, "conversation-1", s_happy_command, NULL);
+        emit_device_command(NULL, "agent-uid", id, "conversation-1", s_volume_command, NULL);
     }
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 26);
-    emit_device_command(NULL, "agent-uid", "cmd-fill-20", "conversation-1", s_happy_command, NULL);
-    emit_device_command(NULL, "agent-uid", "cmd-fill-5", "conversation-1", s_happy_command, NULL);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 25);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-20", "conversation-1", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-5", "conversation-1", s_volume_command, NULL);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 26);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 25);
     /* A duplicate does not refresh its FIFO position: the next new ID evicts cmd-fill-5. */
-    emit_device_command(NULL, "agent-uid", "cmd-fill-21", "conversation-1", s_happy_command, NULL);
-    emit_device_command(NULL, "agent-uid", "cmd-fill-5", "conversation-1", s_happy_command, NULL);
-    emit_device_command(NULL, "agent-uid", "cmd-fill-0", "conversation-1", s_happy_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-21", "conversation-1", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-5", "conversation-1", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-0", "conversation-1", s_volume_command, NULL);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 29);
-    /* Cache cmd-happy again so the next conversation also verifies that history is cleared. */
-    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 28);
+    /* The next conversation will reuse this ID after its history has been cleared. */
+    emit_device_command(
+        NULL, "agent-uid", "cmd-volume-session-cache", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":100}}", NULL);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == pulses_before + 30);
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 29);
     assert(read_counter(&s_last_media_volume) == 100);
 }
 
@@ -2628,15 +2799,13 @@ int main(void) {
     assert(wait_for_counter(&s_rtc_leave_calls, 1, 1000));
     assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
     assert(wait_for_lcd_indicator_state(MYBOT_LCD_INDICATOR_VP_REGISTERED, false, 1000));
-    int emotion_pulses_after_stop = read_counter(&s_emotion_pulses);
     int volume_sets_after_stop = read_counter(&s_media_volume_set_calls);
-    emit_device_command(NULL, "agent-uid", "cmd-after-stop", "conversation-1", s_happy_command,
+    emit_device_command(NULL, "agent-uid", "cmd-after-stop", "conversation-1", s_volume_command,
                         NULL);
     emit_device_command(
         "rtc-channel", "agent-uid", "cmd-volume-after-stop", "conversation-1",
         "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":0}}", NULL);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == emotion_pulses_after_stop);
     assert(read_counter(&s_media_volume_set_calls) == volume_sets_after_stop);
     /* Late notifications cannot restore the ended conversation's screen. */
     emit_rtm_subscribe_data("rtc-channel", "agent-uid", vp_message, sizeof(vp_message) - 1U);
@@ -2669,9 +2838,12 @@ int main(void) {
     assert(wait_for_counter(&s_rtc_send_calls, sends_before_second_call + 1, 3000));
     assert(read_counter(&s_rtc_init_calls) == 2);
     assert(read_counter(&s_rtc_leave_calls) == 1);
-    emit_device_command(NULL, "agent-uid", "cmd-happy", "conversation-1", s_happy_command, NULL);
+    int volume_sets_before_second_command = read_counter(&s_media_volume_set_calls);
+    emit_device_command(NULL, "agent-uid", "cmd-volume-session-cache", "conversation-1",
+                        s_volume_command, NULL);
     drain_device_commands();
-    assert(read_counter(&s_emotion_pulses) == emotion_pulses_after_stop + 1);
+    assert(read_counter(&s_media_volume_set_calls) == volume_sets_before_second_command + 1);
+    assert(read_counter(&s_last_media_volume) == 50);
 
     /* Wait until playback applies the pending buffer clear before blocking I/O. */
     int activity_checks = read_counter(&s_announce_active_checks);
