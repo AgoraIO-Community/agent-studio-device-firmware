@@ -166,10 +166,10 @@ Linux 参考实现使用 OpenSSL 与系统 CA 库。明文 HTTP 仅存在于
 `MYBOT_LCD_INDICATOR_THINKING` 和 `MYBOT_LCD_INDICATOR_SPEAKING` 分别表示服务端正在监听、
 思考或播报，后三个位互斥。
 
-设备命令通过单次 render 中的 `MYBOT_LCD_INDICATOR_HAPPY`、`MYBOT_LCD_INDICATOR_SAD`、
-`MYBOT_LCD_INDICATOR_ANGRY` 或 `MYBOT_LCD_INDICATOR_SURPRISED` 请求表情，同时保留已有声纹
-和服务状态位。每次含有表情位的调用都启动一个新表情，即使与上次相同。普通刷新没有表情位，
-只更新叠加提示，不重启或取消正在显示的表情。SDK 不持久保存表情命令，也不发送清零刷新。
+LCD 契约另定义了 `MYBOT_LCD_INDICATOR_HAPPY`、`MYBOT_LCD_INDICATOR_SAD`、
+`MYBOT_LCD_INDICATOR_ANGRY` 与 `MYBOT_LCD_INDICATOR_SURPRISED` 一次性表情位，MCP 设备命令
+不再发出这些位。每次含有表情位的 render 调用都启动一个新表情，即使与上次相同。普通刷新
+没有表情位，只更新叠加提示，不重启或取消正在显示的表情。SDK 不持久保存表情命令，也不发送清零刷新。
 平台负责表情预设和动画时序；新表情覆盖未完成的旧表情，离开
 `MYBOT_LCD_SCREEN_IN_CONVERSATION` 时结束表情。异步渲染需在回调返回前复制内容，
 `destroy()` 释放上下文前必须等待相关工作退出。接口契约见
@@ -411,11 +411,15 @@ RTM UID 必须非空、长度小于 64 字节，并且只能包含 Agora 接受�
 
 ### MCP 设备命令
 
-MCP 工具调用及云端鉴权由服务端负责。SDK 直接接收 RTM 中已定义的 DeviceCommand v1 JSON
-对象，不猜测或解包未定义的云端外层。P2P 和订阅频道消息共用解析器，命令在 `control_mpq` 执行。
-消息不超过 1024 字节；`message_id`、`command_id` 和 `conversation_id` 均须非空且不超过
-127 字节。未知或重复字段、未支持命令、错误参数类型均被拒绝。SDK 不新增 MCP 网络客户端、
-命令 ACK 或执行重试。
+MCP 工具调用及云端鉴权由服务端负责。SDK 仅接收一层云端封装内的 DeviceCommand v1
+`audio.set_volume` 命令：字段精确匹配 `object: "message.user"`、`data_type: "message"`，
+且字符串 `content` 包含命令 JSON。这三个外层字段不可重复，其他外层元数据被忽略，不递归
+展开嵌套封装，也不接受裸命令。会话校验与去重使用内层命令 ID，外层 `message_id` 仅为传输
+元数据。P2P 和订阅频道消息共用解析器，命令在 `control_mpq` 执行。
+
+完整 RTM 消息（含外层封装和 JSON 转义）不超过 1024 字节；内层 `message_id`、`command_id`
+和 `conversation_id` 均须非空且不超过 127 字节。DeviceCommand 中的未知或重复字段、未支持
+命令、错误参数类型均被拒绝。SDK 不新增 MCP 网络客户端、命令 ACK 或执行重试。
 
 对象必需包含 `type: "device_command"`、`schema: "botstation.device-command"`、`version: 1`、
 上述三个 ID，以及含 `type`、`name`、`params` 的 `command` 对象。`issued_at` 与 `expires_at`
@@ -424,13 +428,9 @@ MCP 工具调用及云端鉴权由服务端负责。SDK 直接接收 RTM 中已�
 | Command type | Name | Params |
 | --- | --- | --- |
 | `action` | `audio.set_volume` | 整数 `level: 0..100` |
-| `action` | `audio.adjust_volume` | 整数 `delta: -100..100`；结果限制到 0..100 |
-| `action` | `audio.set_mute` | 布尔值 `muted` |
-| `scene` | `emotion.happy`、`emotion.sad`、`emotion.angry`、`emotion.surprised` | 仅接受空对象 `{}` |
 
-音量命令复用按键调音路径：有效的硬件音量实现优先，否则由 SDK 应用软件增益。静音同时作用
-于 RTC 播放和本地提示音，保留逻辑音量，不停止麦克风采集及上行。云端 AEC 参考使用播放
-实际接受的 PCM，静音时为零；提示音仍不进入参考。
+音量命令复用按键调音路径：有效的硬件音量实现优先，否则由 SDK 应用软件增益。其他 MCP
+action 与 scene 均不支持。
 
 执行时，SDK 将实际 RTM 发送方、频道消息的 channel 及正文 conversation ID 与当前会话
 完整匹配。每个会话的 FIFO 缓存保留最近接受的 16 个 command ID。仍在缓存中的重复 ID

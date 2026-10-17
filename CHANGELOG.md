@@ -10,12 +10,9 @@ This project follows Semantic Versioning.
   24 hexadecimal characters of a MAC HMAC-SHA256 digest, with a maximum length of 32 characters
   and distinct chip prefixes isolating platform ID namespaces.
 - Document regional device-service addresses for mainland China and overseas deployments.
-- Handle cloud MCP DeviceCommand v1 messages through the existing RTM/control path with exact
-  session checks and deduplication of the 16 most recently accepted command IDs. Reuse
-  hardware/software playback volume control and add independent speaker mute without stopping
-  microphone uplink.
-- Deliver happy, sad, angry, and surprised expressions as one-shot LCD indicator requests,
-  preserving voiceprint/server overlays and keeping expression rendering on the platform.
+- Handle cloud MCP `audio.set_volume` DeviceCommand v1 messages through the existing RTM/control
+  path with exact session checks and deduplication of the 16 most recently accepted command IDs.
+  Reuse hardware/software playback volume control.
 - Expand unit coverage for protocol boundaries, allocation failures, callback ownership,
   partial-start cleanup and recovery, including a standalone KV facade test and video-disabled
   lifecycle checks.
@@ -24,6 +21,8 @@ This project follows Semantic Versioning.
 
 ### Fixed
 
+- Decode `audio.set_volume` JSON strings inside the cloud's `message.user` envelope so MCP
+  volume commands reach the existing session-checked RTM command path.
 - Assert non-null arguments before dereferencing device-service mock inputs so whole-tree
   static analysis does not combine invalid-input tests with unchecked mocks in other test programs.
 - Move binding-status polling and single-attempt HTTPS stop notifications to a background service
@@ -63,6 +62,8 @@ This project follows Semantic Versioning.
 
 ### Changed
 
+- Limit MCP parsing to the observed `message.user` envelope carrying `audio.set_volume` with
+  integer `level: 0..100`; remove relative-volume, mute, expression, and bare-command handling.
 - Log complete RTM string messages and RTC error text without SDK-side preview limits.
 - Reuse consumer-owned PCM buffers during session flush, removing temporary drain allocations.
 - Increase the RTC queue capacity from 64 to 1000 pending calls while retaining nonblocking
