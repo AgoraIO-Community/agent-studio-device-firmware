@@ -276,7 +276,10 @@ static void handle_device_command(const aosl_ts_t *ts, aosl_refobj_t ref, uintpt
     if (!remember_command(runtime, command)) {
         goto done;
     }
-    if (mybot_media_pipeline_set_volume(&runtime->media, command->volume) < 0) {
+    int result = command->type == MYBOT_DEVICE_COMMAND_ADJUST_VOLUME
+                     ? mybot_media_pipeline_adjust_volume(&runtime->media, command->value)
+                     : mybot_media_pipeline_set_volume(&runtime->media, command->value);
+    if (result < 0) {
         AOSL_LOG_WRN("[RTM] volume command execution failed");
     }
 done:

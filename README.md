@@ -71,7 +71,8 @@ RTOS, or a bare-metal MCU.
   conversation RTM channel for the server's `message.sal_status` / `VP_REGISTER_SUCCESS` message
   and exposes `MYBOT_LCD_INDICATOR_VP_REGISTERED` as an in-conversation LCD overlay.
 - **Cloud MCP device commands**: Receive session-bound DeviceCommand v1 messages over RTM to
-  set playback volume with `audio.set_volume`, using the cloud's `message.user` envelope.
+  set playback volume with `audio.set_volume` or raise/lower it with `audio.adjust_volume`, using
+  the cloud's `message.user` envelope.
   The cloud owns MCP tool invocation; the SDK reuses its media volume path. Integration is
   described in [PORTING.md](docs/PORTING.md#mcp-device-commands).
 - **Pairing-code voice prompt**: Once per pair code, plays a fixed prompt ("Please enter the

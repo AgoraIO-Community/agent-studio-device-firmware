@@ -474,7 +474,8 @@ indicators. The SDK resets these indicators at conversation boundaries and expos
 ### MCP device commands
 
 MCP tool invocation and cloud authentication belong to the server. The SDK consumes only the
-`audio.set_volume` DeviceCommand v1 from a single cloud envelope with exact fields
+`audio.set_volume` and `audio.adjust_volume` DeviceCommand v1 actions from a single cloud envelope
+with exact fields
 `object: "message.user"`, `data_type: "message"`, and a string `content` containing the command JSON.
 These three envelope fields must be unique; other envelope metadata is ignored. Bare commands
 and nested envelopes are rejected. The inner command supplies the IDs used for session validation
@@ -495,9 +496,13 @@ command validity periods or require clock synchronization.
 | Command type | Name | Params |
 | --- | --- | --- |
 | `action` | `audio.set_volume` | Integer `level: 0..100` |
+| `action` | `audio.adjust_volume` | Integer `delta: -100..100`; positive raises volume, negative lowers it |
 
-The volume command reuses the key-volume path: active hardware volume takes priority, otherwise the
-SDK applies software gain. Other MCP actions and scenes are unsupported.
+Both commands reuse the key-volume path: active hardware volume takes priority, otherwise the
+SDK applies software gain. Adjustments add `delta` to the current volume and clamp the result to
+0..100; zero leaves the volume unchanged. For example, `delta: -10` changes 50 to 40 and
+`delta: 10` changes 50 to 60. Duplicate command IDs do not apply the adjustment again while they
+remain in the cache described below. Other MCP actions and scenes are unsupported.
 
 At execution, the SDK matches the RTM sender, channel when present, and body conversation ID exactly
 against the active session. A per-conversation FIFO cache retains the 16 most recently accepted
