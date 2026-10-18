@@ -62,8 +62,15 @@ PCM 数组预分配**不代表端到端音频链路没有逐帧堆分配**：
   HTTP 头及 chunk 分块封装。到达容量上限后，用栈上的一个字节探测连接结束或响应超限，
   不继续扩容。独立的响应 body 在接收缓冲释放前申请；后续 JSON 解析再申请与 body
   同时存活的节点。32 KiB 接收上限不是单请求总堆占用上限。
+- **后台服务请求**：排队的绑定轮询或停止通知持有地址、凭据及请求/结果数据的堆快照。
+  `control_mpq` 和 `service_mpq` 可各有一个在途 HTTP 请求；需同时核算两份请求/响应缓冲
+  和两条 TLS 连接，包含适配层握手时的堆峰值。绑定轮询同一时刻最多一个尚未完成。
 - **平台与 RTSA**：提示音资源、摄像头/编码器缓冲、TLS 和 RTSA 内部内存需要单独在目标上
   测量。提示音 `open()` 不要求整份资源载入 RAM，应按实际适配实现核算。
+- **设备命令**：有界的解析命令事件及 16 项去重缓存增加控制数据存储，不新增 worker 或帧队列。
+  目标堆与静态内存测量应包含 JSON 解析、排队事件所有权及缓存条目对齐开销。封装命令在解析时
+  暂时同时持有云端外层与解码后的命令 JSON 树，完整 RTM 输入仍限制为 1024 字节。协议和去重
+  能力限制见 [PORTING.zh-CN.md](PORTING.zh-CN.md#mcp-设备命令)。
 
 在持续音视频、提示音、HTTP 请求及反复启停场景中测量堆峰值、最小剩余堆、最大连续空闲块
 和分配频率。纳入排队数据、AOSL 分配及分配器开销，不能只统计 SDK 直接调用的
@@ -73,17 +80,18 @@ PCM 数组预分配**不代表端到端音频链路没有逐帧堆分配**：
 
 | MPQ 线程 | 职责 | 请求的栈大小 |
 | --- | --- | --- |
-| `control_mpq` | 应用状态、设备生命周期、阻塞式 HTTP 控制、UI / 音量和资源转换 | 16 KiB |
+| `control_mpq` | 应用状态、设备生命周期、配对码/开聊/token 续期 HTTP、UI / 音量和资源转换 | 16 KiB |
+| `service_mpq` | 后台 binding-status 轮询及单次 HTTPS 停止通知 | 16 KiB |
 | `rtc_mpq` | Agora RTSA 生命周期、串行状态和 vendor 回调分发 | 8 KiB |
 | `mybot_mpq` | 按 ptime 节奏上行发送音频 | 16 KiB |
 | `cap_mpq` | 麦克风采集 | 16 KiB |
 | `pb_mpq` | 播放与 AEC 参考 | 16 KiB |
 | `key_stdin_mpq`（仅 Linux 参考） | 标准输入按键事件 | 4 KiB |
 
-五个核心 worker 都存在时，请求的栈大小合计 4 × 16 KiB + 8 KiB = 72 KiB。这是源码预算，
+六个核心 worker 都存在时，请求的栈大小合计 5 × 16 KiB + 8 KiB = 88 KiB。这是源码预算，
 不是实测栈用量；HAL 的最小栈限制和对齐要求可能改变实际分配量。栈大小为编译期常量：
-控制线程使用 `src/core/mybot_app.c` 中的
-`CONTROL_MPQ_STACK_SIZE`，音频线程使用 `src/media/mybot_media_pipeline.c` 中的
+控制和后台服务线程使用 `src/core/mybot_app.c` 中的
+`CONTROL_MPQ_STACK_SIZE` 与 `SERVICE_MPQ_STACK_SIZE`，音频线程使用 `src/media/mybot_media_pipeline.c` 中的
 `MEDIA_MPQ_STACK_SIZE`。调整前应在目标上测量每个 worker 的栈高水位，覆盖错误和停止路径。
 平台编码器/驱动任务及 RTSA 内部线程需单独计入。线程与缓冲借用契约以
 [音频](../include/mybot/platform/mybot_audio.h)和
@@ -99,13 +107,17 @@ PCM 数组预分配**不代表端到端音频链路没有逐帧堆分配**：
 - HTTP 客户端对连接、发送、接收检查共享的 5 s deadline，这不是绝对的实际耗时上限：
   普通 TCP 路径先调用不带 timeout 参数的 `aosl_hal_gethostbyname()`，再检查剩余时限。
   测量时应纳入目标 DNS/传输接口的阻塞时间。
-- 设备服务 HTTP 在 `control_mpq` 上同步执行，会延迟排队的 UI 和视频控制操作。
-  音频 worker 相互独立，但媒体发送及下行分发共享 `rtc_mpq`，还会竞争 CPU 和分配器。
-  应在产品负载下测量调度延迟、音频欠载、编码帧 handler 时延及停止耗时。
+- binding-status 轮询及 HTTPS 停止通知在 `service_mpq` 上执行，`control_mpq` 可继续处理
+  本地挂断与新的开聊请求。配对码、开始会话和 RTC token 续期 HTTP 仍在 `control_mpq`
+  上同步执行，RTM 登录/订阅等待也会阻塞该线程。关闭时等待在途后台 HTTPS；当前没有
+  传输取消接口。音频 worker 相互独立，但媒体发送及下行分发共享 `rtc_mpq`，还会竞争
+  CPU 和分配器。应在产品负载下测量调度延迟、音频欠载、编码帧 handler 时延及停止耗时。
 - `control_mpq` 保持 1000 次调用的队列上限，并使用 `SIGP_EVENT | NONBLOCK`。投递不会等待
   队列空位；成功投递的同步 MPQ 调用仍会等待工作线程执行。这可避免控制线程等待 RTC 时，
   RTC 回调又在等待控制队列空位。队列满时的通知丢弃及退出处理见
   [PORTING.zh-CN.md](PORTING.zh-CN.md)。
+- `service_mpq` 同样使用 `SIGP_EVENT | NONBLOCK`，队列上限为 1000 次调用。它顺序执行请求，
+  将轮询结果投递回 `control_mpq`，不修改生命周期状态。
 
 ## 功耗管理
 
@@ -129,7 +141,9 @@ PCM 数组预分配**不代表端到端音频链路没有逐帧堆分配**：
 - RTSA 使用 `RTC_LOG_ERROR` 初始化。其初始化会修改全局 AOSL 日志等级，适配层会提前保存，
   并在初始化成功或失败后恢复原 AOSL 等级。
 - 常规 RTM 消息和转发日志使用 `AOSL_LOG_DBG`；异常保留 warning/error 等级。开启 DEBUG 时
-  应测量格式化和日志输出开销，尤其是消息内容打印。
+  RTM 字符串消息和 RTC 错误文本完整传给日志接口，应测量格式化和日志输出开销。
+  同时检查目标日志输出层：仓库内的 BK725x AOSL HAL 使用 512 字节格式化缓冲区，
+  Linux HAL 则直接打印。
 - 当前核心和提示音模块会在 NOTICE 级打印配对码，生产日志处理应考虑这一行为；
   不要增加设备 token 等凭证日志。
 

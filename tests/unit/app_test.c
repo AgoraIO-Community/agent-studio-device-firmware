@@ -14,6 +14,7 @@
 #include "mybot_device_lifecycle.h"
 #include "mybot_key_internal.h"
 #include "mybot_kv_store_internal.h"
+#include "mybot_json.h"
 #include "mybot_lcd_internal.h"
 #include "mybot_platform_registry.h"
 #include "mybot_agora_rtc.h"
@@ -23,6 +24,7 @@
 #include <api/aosl.h>
 #include <api/aosl_log.h>
 #include <api/aosl_mpq.h>
+#include <hal/aosl_hal_memory.h>
 #include <hal/aosl_hal_time.h>
 
 #include <assert.h>
@@ -46,7 +48,7 @@
 #define TEST_SEND_STREAMS 1
 #endif
 #define TEST_SEND_FRAME_BYTES (TEST_MONO_FRAME_BYTES * TEST_SEND_STREAMS)
-#define TEST_MAX_SENT_FRAMES 32
+#define TEST_MAX_SENT_FRAMES 64
 #define TEST_MIC_BASE 1000
 #define TEST_REF_SAMPLE (-2345)
 
@@ -74,6 +76,19 @@ static bool s_device_stop_requested;
 static bool s_device_pair_requested;
 static bool s_device_token_renewal_requested;
 static bool s_device_network_available = true;
+static bool s_service_poll_requested;
+static bool s_block_service_poll;
+static bool s_service_poll_entered;
+static bool s_block_service_stop;
+static bool s_service_stop_entered;
+static int s_service_poll_calls;
+static int s_service_stop_calls;
+static int s_service_stop_result;
+static int s_service_result_calls;
+static bool s_track_service_thread;
+static bool s_service_thread_valid;
+static pthread_t s_service_thread;
+static aosl_mpq_t s_test_service_mpq = AOSL_MPQ_INVALID;
 static bool s_block_device_tick;
 static bool s_device_tick_entered;
 static bool s_rtc_flood_returned;
@@ -106,9 +121,14 @@ static int s_service_failure;
 static bool s_control_create_fails;
 static bool s_control_call_fails;
 static bool s_control_destroy_fails;
+static bool s_service_create_fails;
+static bool s_service_destroy_fails;
 static const char *s_media_create_failure;
 static aosl_mpq_t s_wrapped_control_mpq = AOSL_MPQ_INVALID;
+static aosl_mpq_t s_wrapped_service_mpq = AOSL_MPQ_INVALID;
 static int s_control_destroy_failures;
+static int s_service_destroy_failures;
+static int s_service_destroy_calls;
 #endif
 
 static mybot_agora_rtc_callbacks_t s_rtc_callbacks;
@@ -229,6 +249,7 @@ static int s_playback_start_calls;
 static int s_playback_stop_calls;
 static int s_playback_destroy_calls;
 static int s_playback_write_calls;
+static int s_last_playback_sample;
 static int s_announce_active_checks;
 static int s_device_init_calls;
 static int s_device_shutdown_calls;
@@ -248,6 +269,7 @@ static int s_stop_requests;
 static int s_conversation_ended_notifications;
 static int s_media_volume_set_calls;
 static int s_last_media_volume;
+static int s_emotion_pulses;
 static char s_renewed_token[512];
 
 static size_t s_sent_lengths[TEST_MAX_SENT_FRAMES];
@@ -312,7 +334,11 @@ aosl_mpq_t __wrap_aosl_mpq_create_flags(int flags, int pri, int stack_size, int 
                                         const char *name, aosl_mpq_init_t init,
                                         aosl_mpq_fini_t fini, void *arg) {
     bool control = name && strcmp(name, "control_mpq") == 0;
+    bool service = name && strcmp(name, "service_mpq") == 0;
     if (control && s_control_create_fails) {
+        return AOSL_MPQ_INVALID;
+    }
+    if (service && s_service_create_fails) {
         return AOSL_MPQ_INVALID;
     }
     if (s_media_create_failure && name && strcmp(name, s_media_create_failure) == 0) {
@@ -322,6 +348,9 @@ aosl_mpq_t __wrap_aosl_mpq_create_flags(int flags, int pri, int stack_size, int 
         __real_aosl_mpq_create_flags(flags, pri, stack_size, max, name, init, fini, arg);
     if (control) {
         s_wrapped_control_mpq = mpq;
+    }
+    if (service) {
+        s_wrapped_service_mpq = mpq;
     }
     return mpq;
 }
@@ -342,6 +371,19 @@ int __wrap_aosl_mpq_destroy_wait(aosl_mpq_t mpq) {
     if (mpq == s_wrapped_control_mpq && s_control_destroy_fails) {
         s_control_destroy_failures++;
         return -1;
+    }
+    if (mpq == s_wrapped_service_mpq) {
+        mock_lock();
+        s_service_destroy_calls++;
+        assert(pthread_cond_broadcast(&s_io_cond) == 0);
+        bool fails = s_service_destroy_fails;
+        if (fails) {
+            s_service_destroy_failures++;
+        }
+        mock_unlock();
+        if (fails) {
+            return -1;
+        }
     }
     return __real_aosl_mpq_destroy_wait(mpq);
 }
@@ -406,6 +448,84 @@ static bool wait_for_flag(const bool *flag, int timeout_ms) {
         aosl_hal_msleep(1);
     }
     return false;
+}
+
+static void wait_for_service_flag(const bool *flag) {
+    struct timespec deadline;
+    assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_sec += 3;
+    mock_lock();
+    while (!*flag) {
+        assert(pthread_cond_timedwait(&s_io_cond, &s_lock, &deadline) == 0);
+    }
+    mock_unlock();
+}
+
+static void service_request_entered(bool *entered, const bool *blocked) {
+    assert(!aosl_mpq_invalid(aosl_mpq_this()));
+    mock_lock();
+    s_test_service_mpq = aosl_mpq_this();
+    if (s_track_service_thread) {
+        assert(s_control_thread_valid);
+        assert(!pthread_equal(s_control_thread, pthread_self()));
+        if (s_service_thread_valid) {
+            assert(pthread_equal(s_service_thread, pthread_self()));
+        } else {
+            s_service_thread = pthread_self();
+            s_service_thread_valid = true;
+        }
+    }
+    *entered = true;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    struct timespec deadline;
+    assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_sec += 5;
+    while (*blocked) {
+        assert(pthread_cond_timedwait(&s_io_cond, &s_lock, &deadline) == 0);
+    }
+    mock_unlock();
+}
+
+int mybot_device_client_get_binding_status(const char *base_url, const char *device_id,
+                                           const char *auth_header, mybot_device_binding_t *resp) {
+    assert(base_url != NULL);
+    assert(device_id != NULL);
+    assert(auth_header != NULL);
+    assert(resp != NULL);
+    assert(strcmp(base_url, TEST_SERVER_BASE) == 0);
+    assert(strcmp(device_id, "device-1") == 0);
+    assert(strcmp(auth_header, "Device device-service-token") == 0);
+    service_request_entered(&s_service_poll_entered, &s_block_service_poll);
+    memset(resp, 0, sizeof(*resp));
+    snprintf(resp->status, sizeof(resp->status), "%s", "bound");
+    mock_lock();
+    s_service_poll_calls++;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    return 0;
+}
+
+int mybot_device_client_stop_conversation(const char *base_url, const char *device_id,
+                                          const char *device_token, const char *conversation_id,
+                                          const char *reason) {
+    assert(base_url != NULL);
+    assert(device_id != NULL);
+    assert(device_token != NULL);
+    assert(conversation_id != NULL);
+    assert(reason != NULL);
+    assert(strcmp(base_url, TEST_SERVER_BASE) == 0);
+    assert(strcmp(device_id, "device-1") == 0);
+    assert(strcmp(device_token, "device-service-token") == 0);
+    assert(strcmp(conversation_id, "conversation-1") == 0);
+    assert(strcmp(reason, MYBOT_CONVERSATION_STOP_REASON_USER_REQUESTED) == 0 ||
+           strcmp(reason, MYBOT_CONVERSATION_STOP_REASON_DEVICE_HANGUP) == 0);
+    service_request_entered(&s_service_stop_entered, &s_block_service_stop);
+    mock_lock();
+    s_service_stop_calls++;
+    int result = s_service_stop_result;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    return result;
 }
 
 static void wait_for_io_stop(bool *block_requested, bool *blocked, bool *started, bool *timed_out) {
@@ -636,6 +756,69 @@ static void emit_rtm_subscribe_data(const char *channel, const char *rtm_uid, co
     callback(channel, rtm_uid, data, len, "json", user_data);
 }
 
+static void control_barrier(const aosl_ts_t *ts, aosl_refobj_t ref, uintptr_t argc,
+                            uintptr_t argv[]) {
+    (void)ts;
+    (void)ref;
+    (void)argv;
+    assert(argc == 0);
+    observe_control_thread(0);
+}
+
+static void drain_device_commands(void) {
+    mock_lock();
+    aosl_mpq_t control = s_test_control_mpq;
+    mock_unlock();
+    assert(!aosl_mpq_invalid(control));
+    assert(aosl_mpq_call(control, AOSL_REF_INVALID, "device_command_test_barrier", control_barrier,
+                         0) == 0);
+}
+
+static size_t make_cloud_message(char *message, size_t capacity, const char *fields,
+                                 const char *content_key, const char *content);
+
+static size_t make_device_command(char *message, size_t capacity, const char *id,
+                                  const char *conversation, const char *command,
+                                  const char *metadata) {
+    int length = snprintf(message, capacity,
+                          "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\","
+                          "\"version\":1,\"message_id\":\"msg-%s\",\"command_id\":\"%s\","
+                          "\"conversation_id\":\"%s\",\"command\":%s%s}",
+                          id, id, conversation, command, metadata ? metadata : "");
+    assert(length > 0 && (size_t)length < capacity);
+    return (size_t)length;
+}
+
+static void emit_bare_device_command(const char *channel, const char *sender, const char *id,
+                                     const char *conversation, const char *command) {
+    char message[768];
+    size_t length = make_device_command(message, sizeof(message), id, conversation, command, NULL);
+    if (channel) {
+        emit_rtm_subscribe_data(channel, sender, message, length);
+    } else {
+        emit_rtm_data(sender, message, length);
+    }
+}
+
+static void emit_device_command(const char *channel, const char *sender, const char *id,
+                                const char *conversation, const char *command,
+                                const char *metadata) {
+    char content[768];
+    make_device_command(content, sizeof(content), id, conversation, command, metadata);
+    char message[1024];
+    size_t length = make_cloud_message(message, sizeof(message),
+                                       "\"object\":\"message.user\",\"data_type\":\"message\"",
+                                       "content", content);
+    if (channel) {
+        emit_rtm_subscribe_data(channel, sender, message, (size_t)length);
+    } else {
+        emit_rtm_data(sender, message, (size_t)length);
+    }
+}
+
+static const char s_volume_command[] =
+    "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":50}}";
+
 bool mybot_platform_registry_is_registered(void) {
     return s_platform_registered;
 }
@@ -667,8 +850,15 @@ int mybot_lcd_show_screen(mybot_lcd_t *lcd, mybot_lcd_screen_t screen) {
 int mybot_lcd_show_content(mybot_lcd_t *lcd, const mybot_lcd_content_t *content) {
     assert(lcd != NULL);
     assert(content != NULL);
+    if (content->indicators & MYBOT_LCD_INDICATOR_EMOTION_MASK) {
+        observe_control_thread(0);
+        assert(content->screen == MYBOT_LCD_SCREEN_IN_CONVERSATION);
+    }
     mock_lock();
     s_last_lcd_content = *content;
+    if (content->indicators & MYBOT_LCD_INDICATOR_EMOTION_MASK) {
+        s_emotion_pulses++;
+    }
     mock_unlock();
     return 0;
 }
@@ -880,6 +1070,7 @@ static int playback_write(void *ctx, const void *buf, int frames) {
     }
     if (started) {
         s_playback_write_calls++;
+        s_last_playback_sample = ((const int16_t *)buf)[0];
     }
     mock_unlock();
     return started ? written : 0;
@@ -928,6 +1119,7 @@ void mybot_audio_context_init(mybot_audio_t *audio) {
     memset(audio, 0, sizeof(*audio));
     audio->capture_ops = &s_capture_ops;
     audio->playback_ops = &s_playback_ops;
+    aosl_atomic_set(&audio->media_volume, MYBOT_AUDIO_VOLUME_DEFAULT);
 }
 
 int mybot_audio_device_volume_init(mybot_audio_t *audio) {
@@ -962,6 +1154,7 @@ int mybot_audio_set_media_volume(mybot_audio_t *audio, int volume) {
         return -1;
     }
     observe_control_thread(CONTROL_OBS_VOLUME);
+    aosl_atomic_set(&audio->media_volume, volume);
     mock_lock();
     s_media_volume_set_calls++;
     s_last_media_volume = volume;
@@ -971,7 +1164,7 @@ int mybot_audio_set_media_volume(mybot_audio_t *audio, int volume) {
 
 int mybot_audio_get_media_volume(const mybot_audio_t *audio) {
     assert(audio != NULL);
-    return MYBOT_AUDIO_VOLUME_DEFAULT;
+    return (int)aosl_atomic_read(&audio->media_volume);
 }
 
 void mybot_audio_apply_media_volume(const mybot_audio_t *audio, int16_t *pcm, int samples) {
@@ -1051,6 +1244,42 @@ void mybot_wifi_deinit(mybot_wifi_t *wifi) {
     mock_unlock();
 }
 
+static void submit_mock_service_request(const mybot_device_lifecycle_callbacks_t *callbacks,
+                                        mybot_device_service_request_type_t type,
+                                        const char *reason) {
+    observe_control_thread(0);
+    assert(callbacks->submit_service_request != NULL);
+    mybot_device_service_request_t *request = aosl_hal_malloc(sizeof(*request));
+    assert(request != NULL);
+    memset(request, 0, sizeof(*request));
+    request->type = type;
+    request->network_generation = 11;
+    request->binding_generation = 17;
+    snprintf(request->server_base, sizeof(request->server_base), "%s", TEST_SERVER_BASE);
+    snprintf(request->device_id, sizeof(request->device_id), "%s", "device-1");
+    snprintf(request->credential, sizeof(request->credential), "%s", "device-service-token");
+    if (type == MYBOT_DEVICE_SERVICE_STOP) {
+        snprintf(request->payload.stop.conversation_id,
+                 sizeof(request->payload.stop.conversation_id), "%s", "conversation-1");
+        snprintf(request->payload.stop.reason, sizeof(request->payload.stop.reason), "%s", reason);
+    }
+    assert(callbacks->submit_service_request(request, callbacks->user_data) == 0);
+}
+
+void mybot_device_lifecycle_service_result(mybot_device_lifecycle_t *lifecycle,
+                                           const mybot_device_service_request_t *request) {
+    assert(lifecycle == s_device_lifecycle);
+    assert(request != NULL);
+    assert(request->network_generation == 11);
+    assert(request->binding_generation == 17);
+    assert(request->type == MYBOT_DEVICE_SERVICE_STOP || request->result == 0);
+    observe_control_thread(0);
+    mock_lock();
+    s_service_result_calls++;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+}
+
 int mybot_device_lifecycle_init(mybot_device_lifecycle_t *lifecycle, mybot_kv_store_t *kv_store,
                                 const char *server_base, const char *device_id,
                                 const char *firmware_ver, const char *hw_model,
@@ -1070,6 +1299,8 @@ int mybot_device_lifecycle_init(mybot_device_lifecycle_t *lifecycle, mybot_kv_st
     }
     mock_lock();
     s_device_lifecycle = lifecycle;
+    lifecycle->conversation_id[0] = '\0';
+    aosl_atomic_set(&lifecycle->stop_request, 0);
     s_device_callbacks = *callbacks;
     s_device_state = MYBOT_DEVICE_STATE_RUNTIME;
     s_device_start_requested = false;
@@ -1077,6 +1308,7 @@ int mybot_device_lifecycle_init(mybot_device_lifecycle_t *lifecycle, mybot_kv_st
     s_device_pair_requested = false;
     s_device_token_renewal_requested = false;
     s_device_network_available = true;
+    s_service_poll_requested = false;
     s_device_init_calls++;
     mock_unlock();
     if (callbacks->on_state_changed) {
@@ -1095,9 +1327,11 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
         DEVICE_TICK_START,
         DEVICE_TICK_STOP,
         DEVICE_TICK_RENEW_TOKEN,
+        DEVICE_TICK_POLL,
     } action = DEVICE_TICK_IDLE;
 
     mock_lock();
+    s_test_control_mpq = aosl_mpq_this();
     if (s_block_device_tick) {
         s_test_control_mpq = aosl_mpq_this();
         s_device_tick_entered = true;
@@ -1128,10 +1362,19 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
         s_device_state = MYBOT_DEVICE_STATE_IN_CONVERSATION;
         callbacks = s_device_callbacks;
         action = DEVICE_TICK_START;
+    } else if (s_service_poll_requested) {
+        s_service_poll_requested = false;
+        callbacks = s_device_callbacks;
+        action = DEVICE_TICK_POLL;
     }
     mock_unlock();
 
     if (action == DEVICE_TICK_IDLE) {
+        return;
+    }
+
+    if (action == DEVICE_TICK_POLL) {
+        submit_mock_service_request(&callbacks, MYBOT_DEVICE_SERVICE_DEVICE_POLL, NULL);
         return;
     }
 
@@ -1150,12 +1393,16 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
     }
 
     if (action == DEVICE_TICK_STOP) {
+        lifecycle->conversation_id[0] = '\0';
+        aosl_atomic_set(&lifecycle->stop_request, 0);
         if (callbacks.on_conversation_stop) {
             callbacks.on_conversation_stop(callbacks.user_data);
         }
         if (callbacks.on_state_changed) {
             callbacks.on_state_changed(MYBOT_DEVICE_STATE_RUNTIME, callbacks.user_data);
         }
+        submit_mock_service_request(&callbacks, MYBOT_DEVICE_SERVICE_STOP,
+                                    MYBOT_CONVERSATION_STOP_REASON_USER_REQUESTED);
         return;
     }
 
@@ -1176,6 +1423,7 @@ void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle) {
     snprintf(params.rtc_uid, sizeof(params.rtc_uid), "%s", "device-uid");
     snprintf(params.rtc_agent_uid, sizeof(params.rtc_agent_uid), "%s", "agent-uid");
     snprintf(params.rtc_token, sizeof(params.rtc_token), "%s", "rtc-token");
+    memcpy(lifecycle->conversation_id, params.conversation_id, sizeof(lifecycle->conversation_id));
     callbacks.on_conversation_start(&params, callbacks.user_data);
 }
 
@@ -1201,6 +1449,8 @@ void mybot_device_lifecycle_shutdown(mybot_device_lifecycle_t *lifecycle) {
     bool stop_conversation = false;
     mock_lock();
     s_device_shutdown_calls++;
+    lifecycle->conversation_id[0] = '\0';
+    aosl_atomic_set(&lifecycle->stop_request, 0);
     if (s_device_state == MYBOT_DEVICE_STATE_IN_CONVERSATION) {
         s_device_state = MYBOT_DEVICE_STATE_RUNTIME;
         callbacks = s_device_callbacks;
@@ -1209,6 +1459,10 @@ void mybot_device_lifecycle_shutdown(mybot_device_lifecycle_t *lifecycle) {
     mock_unlock();
     if (stop_conversation && callbacks.on_conversation_stop) {
         callbacks.on_conversation_stop(callbacks.user_data);
+    }
+    if (stop_conversation) {
+        submit_mock_service_request(&callbacks, MYBOT_DEVICE_SERVICE_STOP,
+                                    MYBOT_CONVERSATION_STOP_REASON_DEVICE_HANGUP);
     }
 }
 
@@ -1234,6 +1488,7 @@ void mybot_device_lifecycle_request_stop(mybot_device_lifecycle_t *lifecycle) {
     mock_lock();
     s_stop_requests++;
     s_device_stop_requested = true;
+    aosl_atomic_set(&lifecycle->stop_request, 1);
     mock_unlock();
 }
 
@@ -1365,10 +1620,12 @@ static void *stop_thread(void *arg) {
     (void)arg;
     mock_lock();
     s_stop_thread_entered = true;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
     mock_unlock();
     mybot_stop();
     mock_lock();
     s_stop_thread_returned = true;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
     mock_unlock();
     return NULL;
 }
@@ -1673,6 +1930,134 @@ static void test_service_startup_failures(const mybot_config_t *config) {
     }
 }
 
+static void service_barrier(const aosl_ts_t *ts, aosl_refobj_t ref, uintptr_t argc,
+                            uintptr_t argv[]) {
+    (void)ts;
+    (void)ref;
+    (void)argv;
+    assert(argc == 0);
+}
+
+static void drain_service_requests(void) {
+    mock_lock();
+    aosl_mpq_t service = s_test_service_mpq;
+    mock_unlock();
+    assert(!aosl_mpq_invalid(service));
+    assert(aosl_mpq_call(service, AOSL_REF_INVALID, "service_test_barrier", service_barrier, 0) ==
+           0);
+    drain_device_commands();
+}
+
+static void test_background_service_requests(const mybot_config_t *config) {
+    begin_control_thread_tracking();
+    mock_lock();
+    s_track_service_thread = true;
+    s_service_thread_valid = false;
+    mock_unlock();
+    assert(mybot_start(config) == 0);
+    emit_wifi_event(MYBOT_WIFI_EVENT_STA_CONNECTED);
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+
+    /* A status request remains blocked while both start and local hangup run. */
+    mock_lock();
+    s_block_service_poll = true;
+    s_service_poll_entered = false;
+    s_service_poll_requested = true;
+    int polls_before = s_service_poll_calls;
+    int results_before = s_service_result_calls;
+    int joins_before = s_rtc_join_calls;
+    int leaves_before = s_rtc_leave_calls;
+    mock_unlock();
+    wait_for_service_flag(&s_service_poll_entered);
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_START);
+    assert(wait_for_counter(&s_rtc_join_calls, joins_before + 1, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_IN_CONVERSATION, 1000));
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_STOP);
+    assert(wait_for_counter(&s_rtc_leave_calls, leaves_before + 1, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+    assert(read_counter(&s_service_poll_calls) == polls_before);
+    assert(read_counter(&s_service_result_calls) == results_before);
+    mock_lock();
+    s_block_service_poll = false;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    drain_service_requests();
+    assert(read_counter(&s_service_poll_calls) == polls_before + 1);
+    assert(read_counter(&s_service_result_calls) >= results_before + 1);
+
+    /* A slow stop POST must not hold up the next conversation's start. */
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_START);
+    assert(wait_for_counter(&s_rtc_join_calls, joins_before + 2, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_IN_CONVERSATION, 1000));
+    mock_lock();
+    s_block_service_stop = true;
+    s_service_stop_result = 503;
+    s_service_stop_entered = false;
+    int stops_before = s_service_stop_calls;
+    mock_unlock();
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_STOP);
+    assert(wait_for_counter(&s_rtc_leave_calls, leaves_before + 2, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+    wait_for_service_flag(&s_service_stop_entered);
+    emit_key_event(MYBOT_KEY_EVENT_CONVERSATION_START);
+    assert(wait_for_counter(&s_rtc_join_calls, joins_before + 3, 1000));
+    assert(wait_for_app_state(MYBOT_STATE_IN_CONVERSATION, 1000));
+    assert(read_counter(&s_service_stop_calls) == stops_before);
+    mock_lock();
+    s_block_service_stop = false;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    drain_service_requests();
+    assert(read_counter(&s_service_stop_calls) == stops_before + 1);
+    mock_lock();
+    s_service_stop_result = 0;
+    mock_unlock();
+
+    /* Shutdown waits for HTTP ownership, discards its result, and still sends
+     * the final stop notification queued behind the in-flight poll. */
+    mock_lock();
+    s_block_service_poll = true;
+    s_service_poll_entered = false;
+    s_service_poll_requested = true;
+    s_stop_thread_entered = false;
+    s_stop_thread_returned = false;
+    results_before = s_service_result_calls;
+    stops_before = s_service_stop_calls;
+    int shutdowns_before = s_device_shutdown_calls;
+#if MYBOT_TEST_WRAP_APP_MPQ
+    int service_destroys_before = s_service_destroy_calls;
+#endif
+    mock_unlock();
+    wait_for_service_flag(&s_service_poll_entered);
+    pthread_t stop_tid;
+    int thread_result = pthread_create(&stop_tid, NULL, stop_thread, NULL);
+    assert(thread_result == 0);
+    wait_for_service_flag(&s_stop_thread_entered);
+    assert(wait_for_counter(&s_device_shutdown_calls, shutdowns_before + 1, 1000));
+#if MYBOT_TEST_WRAP_APP_MPQ
+    assert(wait_for_counter(&s_service_destroy_calls, service_destroys_before + 1, 1000));
+#endif
+    assert(!mybot_is_running());
+    assert(!read_bool(&s_stop_thread_returned));
+    assert(read_counter(&s_service_result_calls) == results_before);
+    mock_lock();
+    s_block_service_poll = false;
+    assert(pthread_cond_broadcast(&s_io_cond) == 0);
+    mock_unlock();
+    wait_for_service_flag(&s_stop_thread_returned);
+    thread_result = pthread_join(stop_tid, NULL);
+    assert(thread_result == 0);
+    assert(mybot_get_state() == MYBOT_STATE_STOPPED);
+    assert(read_counter(&s_service_stop_calls) == stops_before + 1);
+    assert(read_counter(&s_service_result_calls) == results_before);
+    mock_lock();
+    assert(s_control_thread_valid && !s_control_thread_mismatch);
+    assert(s_service_thread_valid);
+    s_track_control_thread = false;
+    s_track_service_thread = false;
+    mock_unlock();
+}
+
 #if MYBOT_TEST_WRAP_APP_MPQ
 static void test_control_queue_failures(const mybot_config_t *config) {
     int wifi_before = read_counter(&s_wifi_init_calls);
@@ -1682,6 +2067,17 @@ static void test_control_queue_failures(const mybot_config_t *config) {
     assert(mybot_get_state() == MYBOT_STATE_STOPPED);
     assert(read_counter(&s_wifi_init_calls) == wifi_before);
     s_control_create_fails = false;
+
+    s_service_create_fails = true;
+    assert(mybot_start(config) == 0);
+    emit_wifi_event(MYBOT_WIFI_EVENT_STA_CONNECTED);
+    assert(wait_for_app_state(MYBOT_STATE_FAILED, 1000));
+    assert(wait_for_runtime_exit(1000));
+    mybot_stop();
+    assert(!mybot_is_running());
+    assert(mybot_get_state() == MYBOT_STATE_STOPPED);
+    s_service_create_fails = false;
+    wifi_before = read_counter(&s_wifi_init_calls);
 
     s_control_call_fails = true;
     assert(mybot_start(config) < 0);
@@ -1734,8 +2130,432 @@ static void test_control_queue_failures(const mybot_config_t *config) {
     assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
     mybot_stop();
     assert(mybot_get_state() == MYBOT_STATE_STOPPED);
+
+    /* A failed HTTP-worker join keeps its runtime reference until a later stop
+     * can drain it; it must also prevent a new start from reusing the runtime. */
+    assert(mybot_start(config) == 0);
+    emit_wifi_event(MYBOT_WIFI_EVENT_STA_CONNECTED);
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+    mock_lock();
+    s_service_destroy_fails = true;
+    int service_failures_before = s_service_destroy_failures;
+    mock_unlock();
+    mybot_stop();
+    assert(!mybot_is_running());
+    assert(read_counter(&s_service_destroy_failures) > service_failures_before);
+    assert(mybot_start(config) < 0);
+    mock_lock();
+    s_service_destroy_fails = false;
+    mock_unlock();
+    mybot_stop();
+    assert(mybot_get_state() == MYBOT_STATE_STOPPED);
+    assert(mybot_start(config) == 0);
+    emit_wifi_event(MYBOT_WIFI_EVENT_STA_CONNECTED);
+    assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
+    mybot_stop();
 }
 #endif
+
+static size_t s_envelope_alloc_calls;
+static size_t s_envelope_alloc_fail_at;
+static size_t s_envelope_alloc_live;
+
+static void *envelope_json_malloc(size_t size) {
+    if (++s_envelope_alloc_calls == s_envelope_alloc_fail_at) {
+        return NULL;
+    }
+    void *pointer = aosl_hal_malloc(size);
+    if (pointer) {
+        ++s_envelope_alloc_live;
+    }
+    return pointer;
+}
+
+static void envelope_json_free(void *pointer) {
+    if (pointer) {
+        assert(s_envelope_alloc_live > 0);
+        --s_envelope_alloc_live;
+    }
+    aosl_hal_free(pointer);
+}
+
+static void test_cloud_message_allocation_failures(const char *message, size_t length) {
+    /* This test's RTM parsing runs synchronously on the caller. No JSON trees
+     * remain live while the allocator hooks are changed. */
+    mybot_json_hooks_t hooks = {.malloc_fn = envelope_json_malloc, .free_fn = envelope_json_free};
+    s_envelope_alloc_calls = 0;
+    s_envelope_alloc_fail_at = 0;
+    assert(mybot_json_init_hooks(&hooks) == 0);
+    mybot_json_t *outer = mybot_json_parse(message);
+    assert(outer != NULL);
+    size_t outer_allocations = s_envelope_alloc_calls;
+    mybot_json_delete(outer);
+    assert(s_envelope_alloc_live == 0);
+
+    int sets_before = read_counter(&s_media_volume_set_calls);
+    const size_t failures[] = {1, outer_allocations + 1};
+    for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i) {
+        s_envelope_alloc_calls = 0;
+        s_envelope_alloc_fail_at = failures[i];
+        emit_rtm_data("agent-uid", message, length);
+        assert(s_envelope_alloc_calls == failures[i]);
+        assert(s_envelope_alloc_live == 0);
+        drain_device_commands();
+        assert(read_counter(&s_media_volume_set_calls) == sets_before);
+    }
+    assert(mybot_json_init_hooks(NULL) == 0);
+}
+
+static size_t make_cloud_message(char *message, size_t capacity, const char *fields,
+                                 const char *content_key, const char *content) {
+    int prefix = snprintf(message, capacity, "{%s,\"%s\":\"", fields, content_key);
+    assert(prefix > 0 && (size_t)prefix < capacity);
+    size_t length = (size_t)prefix;
+    for (const char *p = content; *p; ++p) {
+        assert((unsigned char)*p >= 0x20);
+        assert(length + 4 < capacity);
+        if (*p == '\\' || *p == '"') {
+            message[length++] = '\\';
+        }
+        message[length++] = *p;
+    }
+    message[length++] = '"';
+    message[length++] = '}';
+    message[length] = '\0';
+    return length;
+}
+
+static void emit_cloud_message(const char *channel, const char *fields, const char *content_key,
+                               const char *content) {
+    char message[1024];
+    size_t length = make_cloud_message(message, sizeof(message), fields, content_key, content);
+    if (channel) {
+        emit_rtm_subscribe_data(channel, "agent-uid", message, length);
+    } else {
+        emit_rtm_data("agent-uid", message, length);
+    }
+}
+
+static void test_cloud_message_envelope(void) {
+    /* The exact RTM payload captured from the device log, including its spacing. */
+    static const char captured[] =
+        "{\"message_id\": \"ace5db6a\", \"object\": \"message.user\", \"content\": "
+        "\"{\\\"type\\\":\\\"device_command\\\",\\\"schema\\\":\\\"botstation.device-command\\\","
+        "\\\"version\\\":1,\\\"message_id\\\":\\\"msg_2qGHNLswfXeT-vrRdbieZw\\\","
+        "\\\"command_id\\\":\\\"cmd_oeNNZ1uRv7vDgtrnpu6e5A\\\","
+        "\\\"conversation_id\\\":\\\"conv_59ld9dYHhZfF\\\","
+        "\\\"issued_at\\\":\\\"2026-10-17T08:36:24.039Z\\\","
+        "\\\"expires_at\\\":\\\"2026-10-17T08:36:34.039Z\\\","
+        "\\\"command\\\":{\\\"type\\\":\\\"action\\\",\\\"name\\\":\\\"audio.set_volume\\\","
+        "\\\"params\\\":{\\\"level\\\":50}}}\", \"data_type\": \"message\"}";
+    assert(sizeof(captured) - 1U == 486);
+    int volume_calls_before = read_counter(&s_media_volume_set_calls);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", captured, sizeof(captured) - 1U);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before);
+
+    /* Only the captured conversation ID changes to match the live stub session. */
+    const char *conversation = strstr(captured, "conv_59ld9dYHhZfF");
+    assert(conversation != NULL);
+    char matching[sizeof(captured)];
+    int length =
+        snprintf(matching, sizeof(matching), "%.*sconversation-1%s", (int)(conversation - captured),
+                 captured, conversation + strlen("conv_59ld9dYHhZfF"));
+    assert(length > 0 && (size_t)length < sizeof(matching));
+    emit_rtm_subscribe_data("rtc-channel", "other-uid", matching, (size_t)length);
+    emit_rtm_subscribe_data("bad-channel", "agent-uid", matching, (size_t)length);
+    emit_rtm_data("other-uid", matching, (size_t)length);
+    /* A legal inner command is accepted only inside the actual cloud envelope. */
+    emit_bare_device_command(NULL, "agent-uid", "cmd_oeNNZ1uRv7vDgtrnpu6e5A", "conversation-1",
+                             s_volume_command);
+    emit_bare_device_command("rtc-channel", "agent-uid", "cmd_oeNNZ1uRv7vDgtrnpu6e5A",
+                             "conversation-1", s_volume_command);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before);
+    test_cloud_message_allocation_failures(matching, (size_t)length);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", matching, (size_t)length);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 1);
+    assert(read_counter(&s_last_media_volume) == 50);
+
+    /* Both RTM delivery routes share the inner command ID cache. */
+    emit_rtm_data("agent-uid", matching, (size_t)length);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", matching, (size_t)length);
+    emit_device_command(
+        NULL, "agent-uid", "cmd_oeNNZ1uRv7vDgtrnpu6e5A", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":50}}", NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 1);
+
+    static const char fields[] =
+        "\"message_id\":\"ace5db6a\",\"object\":\"message.user\",\"data_type\":\"message\"";
+    static const char inner[] =
+        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-after-invalid\","
+        "\"command_id\":\"cmd-envelope-after-invalid\",\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}}"
+        "}";
+    static const char *const invalid_fields[] = {
+        "\"object\":\"message.assistant\",\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"data_type\":\"text\"",
+        "\"object\":\"message.user\"",
+        "\"data_type\":\"message\"",
+        "\"Object\":\"message.user\",\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"Data_type\":\"message\"",
+        "\"object\":null,\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"data_type\":1",
+        "\"object\":\"message.user\",\"object\":\"message.user\",\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"data_type\":\"message\",\"data_type\":\"message\"",
+        "\"object\":\"message.user\",\"data_type\":\"message\",\"content\":\"ignored\"",
+        "\"object\":\"message.user\\u0000suffix\",\"data_type\":\"message\"",
+    };
+    for (size_t i = 0; i < sizeof(invalid_fields) / sizeof(invalid_fields[0]); ++i) {
+        emit_cloud_message("rtc-channel", invalid_fields[i], "content", inner);
+    }
+    emit_cloud_message(NULL, fields, "Content", inner);
+    static const char *const invalid_content[] = {
+        "",         "{",
+        "[]",       "null",
+        "true",     "51",
+        "\"text\"", "{\"event_type\":\"state.listening\",\"payload\":{\"value\":true}}",
+    };
+    for (size_t i = 0; i < sizeof(invalid_content) / sizeof(invalid_content[0]); ++i) {
+        emit_cloud_message(NULL, fields, "content", invalid_content[i]);
+    }
+    char nested[1024];
+    make_cloud_message(nested, sizeof(nested), fields, "content", inner);
+    emit_cloud_message("rtc-channel", fields, "content", nested);
+    static const char *const wrong_content_types[] = {
+        "{\"object\":\"message.user\",\"data_type\":\"message\"}",
+        "{\"object\":\"message.user\",\"data_type\":\"message\",\"content\":null}",
+        "{\"object\":\"message.user\",\"data_type\":\"message\",\"content\":51}",
+        "{\"object\":\"message.user\",\"data_type\":\"message\",\"content\":{}}",
+    };
+    for (size_t i = 0; i < sizeof(wrong_content_types) / sizeof(wrong_content_types[0]); ++i) {
+        emit_rtm_data("agent-uid", wrong_content_types[i], strlen(wrong_content_types[i]));
+    }
+    /* The outer string decodes to an escaped NUL in the inner JSON. Reject
+     * that decoded escape and leave the legitimate command ID available. */
+    static const char inner_nul[] =
+        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-after-invalid\","
+        "\"command_id\":\"cmd-envelope-after-invalid\\u0000suffix\","
+        "\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}}"
+        "}";
+    emit_cloud_message(NULL, fields, "content", inner_nul);
+    static const char duplicate_command[] =
+        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-after-invalid\","
+        "\"command_id\":\"cmd-envelope-after-invalid\",\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}},"
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}}"
+        "}";
+    emit_cloud_message("rtc-channel", fields, "content", duplicate_command);
+    static const char uppercase_inner_key[] =
+        "{\"Type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-after-invalid\","
+        "\"command_id\":\"cmd-envelope-after-invalid\",\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":51}}"
+        "}";
+    emit_cloud_message(NULL, fields, "content", uppercase_inner_key);
+    drain_device_commands();
+    assert(mybot_get_state() == MYBOT_STATE_IN_CONVERSATION && mybot_is_running());
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 1);
+    assert(read_counter(&s_last_media_volume) == 50);
+    mock_lock();
+    assert(!(s_last_lcd_content.indicators & MYBOT_LCD_INDICATOR_LISTENING));
+    mock_unlock();
+
+    /* Rejections do not consume the inner ID or the outer metadata message ID. */
+    emit_cloud_message(NULL, fields, "content", inner);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 2);
+    assert(read_counter(&s_last_media_volume) == 51);
+    emit_cloud_message("rtc-channel", fields, "content", inner);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 2);
+
+    /* The transport bound counts the entire encoded envelope, including metadata. */
+    static const char boundary_inner[] =
+        "{\"type\":\"device_command\",\"schema\":\"botstation.device-command\",\"version\":1,"
+        "\"message_id\":\"msg-envelope-boundary\",\"command_id\":\"cmd-envelope-boundary\","
+        "\"conversation_id\":\"conversation-1\","
+        "\"command\":{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":52}}"
+        "}";
+    char boundary[1025];
+    size_t boundary_length =
+        make_cloud_message(boundary, sizeof(boundary), fields, "content", boundary_inner);
+    memset(boundary + boundary_length, ' ', sizeof(boundary) - boundary_length);
+    emit_rtm_data("agent-uid", boundary, sizeof(boundary));
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 2);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", boundary, sizeof(boundary) - 1U);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 3);
+    assert(read_counter(&s_last_media_volume) == 52);
+}
+
+static void test_cloud_adjust_volume(void) {
+    static const char captured[] =
+        "{\"message_id\": \"c14413c1\", \"object\": \"message.user\", \"content\": "
+        "\"{\\\"type\\\":\\\"device_command\\\",\\\"schema\\\":\\\"botstation.device-command\\\","
+        "\\\"version\\\":1,\\\"message_id\\\":\\\"msg_w3fLewic2AFydS6Glp0KpA\\\","
+        "\\\"command_id\\\":\\\"cmd_Wr_3v_X0o95dtLOCwwNlcQ\\\","
+        "\\\"conversation_id\\\":\\\"conv_dMWMDV-aC2tZ\\\","
+        "\\\"issued_at\\\":\\\"2026-10-17T10:00:59.972Z\\\","
+        "\\\"expires_at\\\":\\\"2026-10-17T10:01:09.972Z\\\","
+        "\\\"command\\\":{\\\"type\\\":\\\"action\\\",\\\"name\\\":\\\"audio.adjust_volume\\\","
+        "\\\"params\\\":{\\\"delta\\\":-10}}}\", \"data_type\": \"message\"}";
+    assert(sizeof(captured) - 1U == 490);
+    emit_device_command(NULL, "agent-uid", "cmd-adjust-base", "conversation-1", s_volume_command,
+                        NULL);
+    drain_device_commands();
+    assert(read_counter(&s_last_media_volume) == 50);
+    int sets_before = read_counter(&s_media_volume_set_calls);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", captured, sizeof(captured) - 1U);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_before);
+
+    const char *conversation = strstr(captured, "conv_dMWMDV-aC2tZ");
+    assert(conversation != NULL);
+    char matching[sizeof(captured)];
+    int length =
+        snprintf(matching, sizeof(matching), "%.*sconversation-1%s", (int)(conversation - captured),
+                 captured, conversation + strlen("conv_dMWMDV-aC2tZ"));
+    assert(length > 0 && (size_t)length < sizeof(matching));
+    emit_rtm_subscribe_data("rtc-channel", "other-uid", matching, (size_t)length);
+    emit_rtm_subscribe_data("bad-channel", "agent-uid", matching, (size_t)length);
+    emit_rtm_data("other-uid", matching, (size_t)length);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_before);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", matching, (size_t)length);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_before + 1);
+    assert(read_counter(&s_last_media_volume) == 40);
+
+    /* A repeated relative command must not reduce the volume twice across routes. */
+    emit_rtm_data("agent-uid", matching, (size_t)length);
+    emit_rtm_subscribe_data("rtc-channel", "agent-uid", matching, (size_t)length);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_before + 1);
+    assert(read_counter(&s_last_media_volume) == 40);
+
+    static const struct {
+        int delta;
+        int expected;
+    } adjustments[] = {
+        {-10, 30},  {10, 40},  {-100, 0}, {-10, 0}, {10, 10},
+        {100, 100}, {10, 100}, {-10, 90}, {0, 90},
+    };
+    for (size_t i = 0; i < sizeof(adjustments) / sizeof(adjustments[0]); ++i) {
+        char id[32];
+        char command[96];
+        int id_length = snprintf(id, sizeof(id), "cmd-adjust-sequence-%zu", i);
+        int command_length = snprintf(
+            command, sizeof(command),
+            "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":%d}}",
+            adjustments[i].delta);
+        assert(id_length > 0 && (size_t)id_length < sizeof(id));
+        assert(command_length > 0 && (size_t)command_length < sizeof(command));
+        emit_device_command(i % 2 ? "rtc-channel" : NULL, "agent-uid", id, "conversation-1",
+                            command, NULL);
+        drain_device_commands();
+        assert(read_counter(&s_media_volume_set_calls) == sets_before + 2 + (int)i);
+        assert(read_counter(&s_last_media_volume) == adjustments[i].expected);
+    }
+    /* Absolute volume remains supported and shares the same deduplication cache. */
+    emit_device_command(NULL, "agent-uid", "cmd-adjust-restore", "conversation-1", s_volume_command,
+                        NULL);
+    drain_device_commands();
+    int sets_after_restore = read_counter(&s_media_volume_set_calls);
+    assert(sets_after_restore == sets_before + 11);
+    assert(read_counter(&s_last_media_volume) == 50);
+    emit_device_command(
+        "rtc-channel", "agent-uid", "cmd-adjust-restore", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-10}}", NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == sets_after_restore);
+    assert(read_counter(&s_last_media_volume) == 50);
+}
+
+static void test_device_commands(void) {
+    test_cloud_message_envelope();
+    test_cloud_adjust_volume();
+    int volume_calls_before = read_counter(&s_media_volume_set_calls);
+    int pulses_before = read_counter(&s_emotion_pulses);
+    /* Unsupported commands and invalid levels must not consume the valid ID. */
+    static const char *const unsupported[] = {
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-101}}",
+        "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":101}}",
+        "{\"type\":\"action\",\"name\":\"audio.set_mute\",\"params\":{\"muted\":true}}",
+        "{\"type\":\"scene\",\"name\":\"emotion.happy\",\"params\":{}}",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":101}}",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":-1}}",
+    };
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); ++i) {
+        emit_device_command("rtc-channel", "agent-uid", "cmd-volume", "conversation-1",
+                            unsupported[i], NULL);
+    }
+    emit_device_command(NULL, "other-uid", "cmd-volume", "conversation-1", s_volume_command, NULL);
+    emit_device_command("", "agent-uid", "cmd-volume", "conversation-1", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-volume", "conversation-2", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-volume\\u0000suffix", "conversation-1",
+                        s_volume_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before);
+    assert(read_counter(&s_emotion_pulses) == pulses_before);
+
+    /* Timestamp metadata does not gate volume execution. */
+    const char *const metadata[] = {
+        ",\"issued_at\":\"1970-01-01T00:00:00Z\",\"expires_at\":\"1970-01-01T00:00:01Z\"",
+        ",\"issued_at\":\"9999-01-01T00:00:00Z\",\"expires_at\":\"9999-01-01T00:00:01Z\"",
+        ",\"issued_at\":\"9999-01-01T00:00:00Z\",\"expires_at\":\"1970-01-01T00:00:00Z\"",
+    };
+    for (size_t i = 0; i < sizeof(metadata) / sizeof(metadata[0]); ++i) {
+        char id[32];
+        int length = snprintf(id, sizeof(id), "cmd-volume-time-%zu", i);
+        assert(length > 0 && (size_t)length < sizeof(id));
+        emit_device_command(NULL, "agent-uid", id, "conversation-1", s_volume_command, metadata[i]);
+    }
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 3);
+
+    emit_device_command(NULL, "agent-uid", "cmd-volume", "conversation-1", s_volume_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 4);
+    assert(read_counter(&s_last_media_volume) == 50);
+    emit_device_command("rtc-channel", "agent-uid", "cmd-volume", "conversation-1",
+                        s_volume_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 4);
+
+    /* The last 16 accepted IDs remain deduplicated while new IDs replace the oldest. */
+    for (int index = 0; index < 21; ++index) {
+        char id[32];
+        assert(snprintf(id, sizeof(id), "cmd-fill-%d", index) > 0);
+        emit_device_command(NULL, "agent-uid", id, "conversation-1", s_volume_command, NULL);
+    }
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 25);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-20", "conversation-1", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-5", "conversation-1", s_volume_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 25);
+    /* A duplicate does not refresh its FIFO position: the next new ID evicts cmd-fill-5. */
+    emit_device_command(NULL, "agent-uid", "cmd-fill-21", "conversation-1", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-5", "conversation-1", s_volume_command, NULL);
+    emit_device_command(NULL, "agent-uid", "cmd-fill-0", "conversation-1", s_volume_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 28);
+    /* The next conversation will reuse this ID after its history has been cleared. */
+    emit_device_command(
+        NULL, "agent-uid", "cmd-volume-session-cache", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":100}}", NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_calls_before + 29);
+    assert(read_counter(&s_last_media_volume) == 100);
+}
 
 int main(void) {
     mybot_config_t config;
@@ -1993,6 +2813,8 @@ int main(void) {
     assert(wait_for_lcd_indicator(MYBOT_LCD_INDICATOR_SPEAKING, 1000));
     assert(wait_for_lcd_indicator_state(MYBOT_LCD_INDICATOR_THINKING, false, 1000));
 
+    test_device_commands();
+
     const char speaking_done_message[] =
         "{\"event_type\":\"state.speaking\",\"payload\":{\"value\":false}}";
     emit_rtm_subscribe_data("rtc-channel", "agent-uid", speaking_done_message,
@@ -2062,6 +2884,14 @@ int main(void) {
     assert(wait_for_counter(&s_rtc_leave_calls, 1, 1000));
     assert(wait_for_app_state(MYBOT_STATE_READY, 1000));
     assert(wait_for_lcd_indicator_state(MYBOT_LCD_INDICATOR_VP_REGISTERED, false, 1000));
+    int volume_sets_after_stop = read_counter(&s_media_volume_set_calls);
+    emit_device_command(NULL, "agent-uid", "cmd-after-stop", "conversation-1", s_volume_command,
+                        NULL);
+    emit_device_command(
+        "rtc-channel", "agent-uid", "cmd-volume-after-stop", "conversation-1",
+        "{\"type\":\"action\",\"name\":\"audio.set_volume\",\"params\":{\"level\":0}}", NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_sets_after_stop);
     /* Late notifications cannot restore the ended conversation's screen. */
     emit_rtm_subscribe_data("rtc-channel", "agent-uid", vp_message, sizeof(vp_message) - 1U);
     emit_rtm_subscribe_data("rtc-channel", "agent-uid", thinking_message,
@@ -2093,6 +2923,12 @@ int main(void) {
     assert(wait_for_counter(&s_rtc_send_calls, sends_before_second_call + 1, 3000));
     assert(read_counter(&s_rtc_init_calls) == 2);
     assert(read_counter(&s_rtc_leave_calls) == 1);
+    int volume_sets_before_second_command = read_counter(&s_media_volume_set_calls);
+    emit_device_command(NULL, "agent-uid", "cmd-volume-session-cache", "conversation-1",
+                        s_volume_command, NULL);
+    drain_device_commands();
+    assert(read_counter(&s_media_volume_set_calls) == volume_sets_before_second_command + 1);
+    assert(read_counter(&s_last_media_volume) == 50);
 
     /* Wait until playback applies the pending buffer clear before blocking I/O. */
     int activity_checks = read_counter(&s_announce_active_checks);
@@ -2300,6 +3136,7 @@ int main(void) {
 
     test_control_queue_saturation(&config);
     test_service_startup_failures(&config);
+    test_background_service_requests(&config);
 #if MYBOT_TEST_WRAP_APP_MPQ
     test_control_queue_failures(&config);
 #endif

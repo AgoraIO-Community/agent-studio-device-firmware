@@ -15,6 +15,30 @@
 extern "C" {
 #endif
 
+typedef enum {
+    MYBOT_DEVICE_SERVICE_PAIR_POLL,
+    MYBOT_DEVICE_SERVICE_DEVICE_POLL,
+    MYBOT_DEVICE_SERVICE_STOP,
+} mybot_device_service_request_type_t;
+
+/** Heap-owned HTTP work; only the control owner applies its result. */
+typedef struct {
+    mybot_device_service_request_type_t type;
+    intptr_t network_generation;
+    uint32_t binding_generation;
+    char server_base[MYBOT_DEVICE_CLIENT_MAX_URL];
+    char device_id[MYBOT_DEVICE_CLIENT_MAX_ID];
+    char credential[MYBOT_DEVICE_CLIENT_MAX_TOKEN];
+    int result;
+    union {
+        mybot_device_binding_t binding;
+        struct {
+            char conversation_id[MYBOT_DEVICE_CLIENT_MAX_ID];
+            char reason[32];
+        } stop;
+    } payload;
+} mybot_device_service_request_t;
+
 /* Callbacks invoked by the state machine onto the app layer */
 typedef struct {
     /** A pair code was obtained; present it through the device UI and/or speaker. */
@@ -36,6 +60,9 @@ typedef struct {
 
     /** State changed (for logging / UI). */
     void (*on_state_changed)(mybot_device_state_t state, void *user_data);
+
+    /** Queue HTTP work. Success transfers ownership; failure leaves it with the caller. */
+    int (*submit_service_request)(mybot_device_service_request_t *request, void *user_data);
 
     /** Opaque owner context passed to every callback. */
     void *user_data;
@@ -61,6 +88,8 @@ typedef struct {
     char device_token[MYBOT_DEVICE_CLIENT_MAX_TOKEN];
     int runtime_poll_interval;
     int runtime_tick_counter;
+    bool poll_pending;
+    uint32_t binding_generation;
 
     char conversation_id[MYBOT_DEVICE_CLIENT_MAX_ID];
     char rtc_channel[128];
@@ -102,6 +131,11 @@ int mybot_device_lifecycle_init(mybot_device_lifecycle_t *lifecycle, mybot_kv_st
 /** Called every 100 ms by the application control owner.
  *  Drives polling and state transitions; calls must be serialized. */
 void mybot_device_lifecycle_tick(mybot_device_lifecycle_t *lifecycle);
+
+/** Apply borrowed background HTTP results on the application control owner.
+ *  The caller frees the request after this function returns. */
+void mybot_device_lifecycle_service_result(mybot_device_lifecycle_t *lifecycle,
+                                           const mybot_device_service_request_t *request);
 
 /**
  * Notify the state machine whether device-service networking is available.
