@@ -55,6 +55,11 @@
 - **声纹注册状态**：对话过程中监听当前会话 RTM channel 的
   `message.sal_status` / `VP_REGISTER_SUCCESS` 消息，并通过
   `MYBOT_LCD_INDICATOR_VP_REGISTERED` 向 LCD 提供会话内叠加指示。
+- **云端 MCP 设备命令**：通过 RTM 接收绑定当前会话的 DeviceCommand v1 消息，控制播放
+  音量，支持 `message.user` 封装内的 `audio.set_volume` 及增大/减小音量的
+  `audio.adjust_volume`。MCP 工具调用由云端负责，SDK
+  复用现有媒体音量路径。集成说明见
+  [PORTING.zh-CN.md](docs/PORTING.zh-CN.md#mcp-设备命令)。
 - **配对码语音播报**：每个配对码只播报一次，先播固定提示句（“请在控制台输入配对码”），
   再逐位播报数字，走正常扬声器链路。音频资源为 `./assets/locales/<locale>/` 下的原始 16 kHz
   单声道 16-bit PCM 文件（`prompt.pcm`、`0.pcm`~`9.pcm`），由平台持有，SDK 核心不含解码器。
@@ -116,15 +121,35 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-运行示例：
+### 设备服务地址
+
+按设备使用区域选择服务地址，通过 Linux 示例的 `--server` 或产品集成中的
+`mybot_config_t.server_base` 配置。地址包含 `/api`，末尾不带 `/`。
+
+| 区域 | 设备服务地址 |
+| --- | --- |
+| 国内 | `https://botstation.shengwang.cn/api` |
+| 海外 | `https://botstation.agora.io/api` |
+
+`device_id` 是物理设备的全局唯一、稳定的设备唯一码。产品和设备注册系统须保证一个 ID
+仅对应一台设备。不同芯片平台使用不同且固定的型号前缀，完全隔离 ID 命名空间；即使摘要
+后缀相同，跨平台的完整 ID 也不同。
+产品层按 `<芯片型号>-<24 个大写十六进制字符>` 生成该 ID：使用固定的平台派生 key，
+对设备稳定 MAC 地址计算 HMAC-SHA256，取摘要前 12 字节。芯片型号前缀最多 7 个 ASCII 字符，
+完整 ID 最多 32 字符，不含结尾 NUL。输入与 key 的约定见
+[设备 ID 生成](docs/PORTING.zh-CN.md#设备-id-生成)。SDK 接收该 ID，不负责生成。
+
+使用国内服务运行示例：
 
 ```bash
 ./build/examples/linux/mybot \
-  --server https://api.example.com \
-  --device-id AG-DEMO-001 \
+  --server https://botstation.shengwang.cn/api \
+  --device-id ESP32-BF0C5C8DD323ED321F928C79 \
   --fw-ver 1.2.0 \
   --hw-model linux-reference
 ```
+
+请将示例 ID 替换为当前设备实际生成的 ID。
 
 示例程序还会在拿到配对码时可选地播报语音提示（“请在控制台输入配对码…”），音频来自
 `./assets/locales/<locale>/`（原始 16 kHz 单声道 16-bit PCM：`prompt.pcm`、`0.pcm`~`9.pcm`）。
@@ -331,7 +356,9 @@ flowchart TB
 
 ### 线程模型
 
-应用控制、RTC、音频采集、播放和发送分别由独立线程负责，可选的视频编码器任务由平台持有。
+应用控制、后台设备服务 HTTP、RTC、音频采集、播放和发送分别由独立线程负责。
+`service_mpq` 处理绑定状态轮询和停止通知，结果返回负责生命周期状态的 `control_mpq`。
+HTTPS 适配层需支持独立连接并发调用，可选的视频编码器任务由平台持有。
 线程与栈预算、动态分配和时序测量见 [EMBEDDED](docs/EMBEDDED.zh-CN.md)，平台回调契约以
 [公共头文件](include/mybot/platform/) 为准。
 

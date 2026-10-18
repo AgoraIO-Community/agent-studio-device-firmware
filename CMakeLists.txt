@@ -161,12 +161,17 @@ function(mybot_enable_sanitizers target)
     endif()
     if(MYBOT_ENABLE_COVERAGE AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target} PRIVATE --coverage -g -O0)
+        if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+            # SDK workers and tests update shared gcov counters concurrently.
+            target_compile_options(${target} PRIVATE -fprofile-update=atomic)
+        endif()
         target_link_options(${target} PRIVATE --coverage)
     endif()
 endfunction()
 
 add_library(mybot_sdk STATIC
     src/core/mybot_app.c
+    src/core/mybot_device_command.c
     src/core/mybot_device_lifecycle.c
     src/core/mybot_presenter.c
     src/core/mybot_state_model.c

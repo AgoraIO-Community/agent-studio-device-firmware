@@ -71,9 +71,19 @@ Preallocated PCM arrays do **not** make the end-to-end audio path allocation-fre
   growing the buffer. A separate response body is allocated before the receive buffer is freed;
   later JSON parsing adds nodes alongside that body.
   The 32 KiB receive limit is not a total request heap ceiling.
+- **Background service requests:** a queued binding poll or stop notification owns a heap snapshot
+  of its address, credentials, and request/result data. `control_mpq` and `service_mpq` can each
+  have an HTTP request in flight; budget their request/response buffers and two TLS connections
+  together, including the adapter's handshake peak. At most one binding poll remains outstanding.
 - **Platform and RTSA:** prompt asset storage, camera/encoder buffers, TLS, and RTSA internal
   memory require separate target measurements. Prompt `open()` does not require a whole asset to
   be loaded into RAM; account for the actual adapter implementation.
+- **Device commands:** bounded parsed-command events and a 16-entry deduplication cache add control
+  storage, not a new worker or frame queue. Include JSON parsing, queued event ownership, and cache
+  entry padding in target heap and static-memory measurements. Wrapped commands temporarily hold
+  both the parsed cloud envelope and its decoded command tree; the complete RTM input remains
+  bounded to 1024 bytes. Protocol and deduplication limits
+  are covered in [PORTING.md](PORTING.md#mcp-device-commands).
 
 Measure peak heap, minimum free heap, largest free block, and allocation rate during sustained
 audio/video, prompts, HTTP requests, and repeated start/stop. Include queued payloads, AOSL
@@ -84,17 +94,19 @@ Use [PORTING.md](PORTING.md) for connectivity, pairing, and conversation lifecyc
 
 | MPQ thread | Responsibility | Requested stack |
 | --- | --- | --- |
-| `control_mpq` | App state, device lifecycle, blocking HTTP control, UI/volume, resource transitions | 16 KiB |
+| `control_mpq` | App state, device lifecycle, pair-code/start/token-renewal HTTP, UI/volume, resource transitions | 16 KiB |
+| `service_mpq` | Background binding-status polls and single-attempt HTTPS stop notifications | 16 KiB |
 | `rtc_mpq` | Agora RTSA lifecycle, serialized state, and vendor callback dispatch | 8 KiB |
 | `mybot_mpq` | Uplink audio send at the ptime cadence | 16 KiB |
 | `cap_mpq` | Microphone capture | 16 KiB |
 | `pb_mpq` | Playback and AEC reference | 16 KiB |
 | `key_stdin_mpq` (Linux reference only) | Stdin key events | 4 KiB |
 
-Core requested stacks total 4 × 16 KiB + 8 KiB = 72 KiB when all five workers exist. This is a
+Core requested stacks total 5 × 16 KiB + 8 KiB = 88 KiB when all six workers exist. This is a
 source-derived budget, not measured stack use; HAL minimums and alignment can change actual
-allocation. Stack sizes are compile-time constants: the control worker uses `CONTROL_MPQ_STACK_SIZE` in
-`src/core/mybot_app.c`, while audio workers use `MEDIA_MPQ_STACK_SIZE` in
+allocation. Stack sizes are compile-time constants: the control and background service workers use
+`CONTROL_MPQ_STACK_SIZE` and `SERVICE_MPQ_STACK_SIZE` in `src/core/mybot_app.c`, while audio workers use
+`MEDIA_MPQ_STACK_SIZE` in
 `src/media/mybot_media_pipeline.c`. Measure each worker's stack high-water mark on the target,
 including error and teardown paths, before tuning. Add platform encoder/driver tasks and RTSA's
 internal threads separately. Threading and borrowed-buffer contracts are defined in the
@@ -112,14 +124,19 @@ internal threads separately. Threading and borrowed-buffer contracts are defined
 - The HTTP client checks a shared 5 s deadline for connect/send/receive. This is not an absolute
   wall-clock bound: the plain TCP path calls `aosl_hal_gethostbyname()` without a timeout argument
   before checking the remaining deadline. Include target DNS/transport blocking in measurements.
-- Device-service HTTP runs synchronously on `control_mpq`, delaying queued UI and video-control
-  actions. Audio workers are separate, but media sending and downlink dispatch share `rtc_mpq`;
-  they also compete for CPU and allocation services. Measure scheduling delay, audio underruns,
+- Binding-status polling and HTTPS stop notifications run on `service_mpq`, leaving `control_mpq`
+  available for local hangup and new start requests. Pair-code, conversation-start, and RTC-token
+  renewal HTTP still run synchronously on `control_mpq`; RTM login/subscription waits also block
+  that worker. Shutdown waits for in-flight background HTTPS, with no transport cancellation API.
+  Audio workers are separate, but media sending and downlink dispatch share `rtc_mpq`; they also
+  compete for CPU and allocation services. Measure scheduling delay, audio underruns,
   encoder-handler latency, and shutdown duration under the product workload.
 - `control_mpq` keeps a 1000-call queue limit and uses `SIGP_EVENT | NONBLOCK`. Submission does
   not wait for queue capacity; an accepted synchronous MPQ call still waits for worker execution.
   This prevents RTC callbacks from waiting for queue space while the control worker waits for RTC.
   See [PORTING.md](PORTING.md) for notification drops and exit handling when the queue is full.
+- `service_mpq` also uses `SIGP_EVENT | NONBLOCK` with a 1000-call limit. It executes requests
+  sequentially and posts poll results back to `control_mpq`; it does not modify lifecycle state.
 
 ## Power management
 
@@ -145,7 +162,10 @@ power and timing measurements; enabling it does not itself stop the playback or 
 - RTSA is initialized with `RTC_LOG_ERROR`. Its initialization changes global AOSL logging, so
   the adapter saves and restores the AOSL level on both success and failure.
 - Routine RTM message/forwarding logs use `AOSL_LOG_DBG`; failures remain visible at warning/error
-  levels. Measure log formatting and transport cost when enabling DEBUG, especially for payloads.
+  levels. RTM string payloads and RTC error text are passed to logging in full. Measure log
+  formatting and transport cost when enabling DEBUG, especially for payloads. Check the target
+  logging backend as well: the bundled BK725x AOSL HAL has a 512-byte formatting buffer, while
+  the Linux HAL prints directly.
 - Pairing codes currently appear at NOTICE in the core and announcement logs. Account for that
   output in production log handling; do not add device tokens or other credentials to logs.
 

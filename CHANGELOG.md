@@ -6,6 +6,13 @@ This project follows Semantic Versioning.
 
 ### Added
 
+- Document globally unique, stable product-generated device IDs using a chip prefix and the first
+  24 hexadecimal characters of a MAC HMAC-SHA256 digest, with a maximum length of 32 characters
+  and distinct chip prefixes isolating platform ID namespaces.
+- Document regional device-service addresses for mainland China and overseas deployments.
+- Handle cloud MCP `audio.set_volume` and `audio.adjust_volume` DeviceCommand v1 messages through
+  the existing RTM/control path with exact session checks and deduplication of the 16 most recently
+  accepted command IDs. Reuse hardware/software playback volume control.
 - Expand unit coverage for protocol boundaries, allocation failures, callback ownership,
   partial-start cleanup and recovery, including a standalone KV facade test and video-disabled
   lifecycle checks.
@@ -14,6 +21,22 @@ This project follows Semantic Versioning.
 
 ### Fixed
 
+- Accept observed `audio.adjust_volume` messages so positive and negative deltas raise and lower
+  playback volume through the existing bounded hardware/software path, applying each cached
+  command ID only once.
+- Decode `audio.set_volume` JSON strings inside the cloud's `message.user` envelope so MCP
+  volume commands reach the existing session-checked RTM command path.
+- Assert non-null arguments before dereferencing device-service mock inputs so whole-tree
+  static analysis does not combine invalid-input tests with unchecked mocks in other test programs.
+- Move binding-status polling and single-attempt HTTPS stop notifications to a background service
+  worker so slow requests do not delay local hangup or a new conversation trigger. Keep lifecycle
+  state on the control worker, discard stale polling results, and drain background requests before
+  releasing runtime resources. HTTPS adapters must support two independent concurrent connections.
+- Remove the UTC clock dependency from MCP device commands. `issued_at` and `expires_at` are
+  optional and currently ignored; a full command-ID cache replaces its oldest entry instead of
+  rejecting new commands.
+- Use atomic GCC coverage counters to prevent corrupt branch counts during concurrent worker
+  and test execution.
 - Avoid overflow when combining JSON fractional scale with extreme negative exponents,
   reject non-finite or unrepresentable numbers before integer conversion, and preserve
   signed 64-bit integer values when printing JSON.
@@ -44,6 +67,10 @@ This project follows Semantic Versioning.
 
 - Use agent-studio-device-firmware in documentation and link to the official AgoraIO-Community
   firmware repositories.
+- Limit MCP parsing to observed `message.user` envelopes carrying `audio.set_volume` with integer
+  `level: 0..100` or `audio.adjust_volume` with integer `delta: -100..100`; remove mute, expression,
+  and bare-command handling.
+- Log complete RTM string messages and RTC error text without SDK-side preview limits.
 - Reuse consumer-owned PCM buffers during session flush, removing temporary drain allocations.
 - Increase the RTC queue capacity from 64 to 1000 pending calls while retaining nonblocking
   submission and the existing event handling.

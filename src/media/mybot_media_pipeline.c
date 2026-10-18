@@ -135,10 +135,6 @@ static bool prepare_pending_playback(mybot_media_pipeline_t *pipeline, bool anno
     pipeline->pb_pending_frames = MYBOT_MEDIA_FRAME_SAMPLES;
     pipeline->pb_pending_source = announce_active ? MYBOT_PB_SOURCE_ANNOUNCE : MYBOT_PB_SOURCE_RTC;
 
-    if (!mybot_audio_device_volume_is_active(&pipeline->audio)) {
-        mybot_audio_apply_media_volume(&pipeline->audio, pipeline->pb_pending,
-                                       MYBOT_MEDIA_FRAME_SAMPLES * MYBOT_MEDIA_CHANNELS);
-    }
     return true;
 }
 
@@ -199,10 +195,20 @@ static void playback_timer(aosl_timer_t id, const aosl_ts_t *now, uintptr_t argc
         discard_pending_playback(pipeline);
         return;
     }
-    int written =
-        ops->write(pipeline->pb_ctx,
-                   (const char *)pipeline->pb_pending + pipeline->pb_pending_offset * frame_bytes,
-                   pipeline->pb_pending_frames);
+    const int16_t *write_data = pipeline->pb_pending + pipeline->pb_pending_offset;
+    if (aosl_atomic_read(&pipeline->muted)) {
+        memset(pipeline->announce_frame, 0, (size_t)pipeline->pb_pending_frames * frame_bytes);
+        write_data = pipeline->announce_frame;
+    } else if (!mybot_audio_device_volume_is_active(&pipeline->audio) &&
+               mybot_audio_get_media_volume(&pipeline->audio) != MYBOT_AUDIO_VOLUME_MAX) {
+        /* Keep the pending PCM unchanged so retries use the latest volume and mute setting. */
+        memcpy(pipeline->announce_frame, write_data,
+               (size_t)pipeline->pb_pending_frames * frame_bytes);
+        mybot_audio_apply_media_volume(&pipeline->audio, pipeline->announce_frame,
+                                       pipeline->pb_pending_frames * MYBOT_MEDIA_CHANNELS);
+        write_data = pipeline->announce_frame;
+    }
+    int written = ops->write(pipeline->pb_ctx, write_data, pipeline->pb_pending_frames);
     if (written < 0 || written > pipeline->pb_pending_frames) {
         AOSL_LOG_ERR("playback write failed, dropping %d pending frames",
                      pipeline->pb_pending_frames);
@@ -214,9 +220,8 @@ static void playback_timer(aosl_timer_t id, const aosl_ts_t *now, uintptr_t argc
 #if MYBOT_CLOUD_AEC
     if (written > 0 && pipeline->pb_pending_source == MYBOT_PB_SOURCE_RTC) {
         int ref_bytes = written * frame_bytes;
-        const char *ref_data = (const char *)pipeline->pb_pending +
-                               (pipeline->pb_pending_offset - written) * frame_bytes;
-        if (mybot_ringbuf_write(pipeline->ref_ringbuf, ref_data, ref_bytes) != ref_bytes) {
+        if (mybot_ringbuf_write(pipeline->ref_ringbuf, (const char *)write_data, ref_bytes) !=
+            ref_bytes) {
             AOSL_LOG_ERR("AEC reference enqueue failed after playback write; stopping RTC media");
             aosl_atomic_set(&pipeline->rtc_connected, false);
         }
@@ -367,6 +372,7 @@ int mybot_media_pipeline_start(mybot_media_pipeline_t *pipeline,
     pipeline->cbs = *callbacks;
     pipeline->stop_complete = false;
     mybot_audio_context_init(&pipeline->audio);
+    aosl_atomic_set(&pipeline->muted, false);
     aosl_atomic_set(&pipeline->running, true);
 
     const mybot_audio_capture_ops_t *cap_ops = pipeline->audio.capture_ops;
@@ -628,30 +634,50 @@ void mybot_media_pipeline_stop_prompt(mybot_media_pipeline_t *pipeline) {
     mybot_announce_stop(&pipeline->announce);
 }
 
-void mybot_media_pipeline_adjust_volume(mybot_media_pipeline_t *pipeline, int delta) {
-    if (!pipeline) {
-        return;
+int mybot_media_pipeline_set_volume(mybot_media_pipeline_t *pipeline, int volume) {
+    if (!pipeline || volume < MYBOT_AUDIO_VOLUME_MIN || volume > MYBOT_AUDIO_VOLUME_MAX) {
+        AOSL_LOG_ERR("invalid playback volume: %d", volume);
+        return -1;
     }
+    int result;
+    if (mybot_audio_device_volume_is_active(&pipeline->audio)) {
+        result = mybot_audio_device_set_volume(&pipeline->audio, volume);
+    } else {
+        result = mybot_audio_set_media_volume(&pipeline->audio, volume);
+    }
+    if (result < 0) {
+        AOSL_LOG_ERR("failed to set playback volume: %d", volume);
+        return -1;
+    }
+    return 0;
+}
 
+int mybot_media_pipeline_adjust_volume(mybot_media_pipeline_t *pipeline, int delta) {
+    if (!pipeline || delta < -MYBOT_AUDIO_VOLUME_MAX || delta > MYBOT_AUDIO_VOLUME_MAX) {
+        AOSL_LOG_ERR("invalid playback volume adjustment: %d", delta);
+        return -1;
+    }
     int volume;
     if (mybot_audio_device_volume_is_active(&pipeline->audio)) {
-        if (mybot_audio_device_get_volume(&pipeline->audio, &volume) == 0) {
-            volume += delta;
-            if (volume < MYBOT_AUDIO_VOLUME_MIN) {
-                volume = MYBOT_AUDIO_VOLUME_MIN;
-            } else if (volume > MYBOT_AUDIO_VOLUME_MAX) {
-                volume = MYBOT_AUDIO_VOLUME_MAX;
-            }
-            (void)mybot_audio_device_set_volume(&pipeline->audio, volume);
+        if (mybot_audio_device_get_volume(&pipeline->audio, &volume) < 0 ||
+            volume < MYBOT_AUDIO_VOLUME_MIN || volume > MYBOT_AUDIO_VOLUME_MAX) {
+            AOSL_LOG_ERR("failed to get a valid playback volume");
+            return -1;
         }
-        return;
+    } else {
+        volume = mybot_audio_get_media_volume(&pipeline->audio);
     }
-
-    volume = mybot_audio_get_media_volume(&pipeline->audio) + delta;
+    volume += delta;
     if (volume < MYBOT_AUDIO_VOLUME_MIN) {
         volume = MYBOT_AUDIO_VOLUME_MIN;
     } else if (volume > MYBOT_AUDIO_VOLUME_MAX) {
         volume = MYBOT_AUDIO_VOLUME_MAX;
     }
-    (void)mybot_audio_set_media_volume(&pipeline->audio, volume);
+    return mybot_media_pipeline_set_volume(pipeline, volume);
+}
+
+void mybot_media_pipeline_set_muted(mybot_media_pipeline_t *pipeline, bool muted) {
+    if (pipeline) {
+        aosl_atomic_set(&pipeline->muted, muted);
+    }
 }

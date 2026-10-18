@@ -134,6 +134,36 @@ static aosl_atomic_t s_probe_fini_callback;
 static aosl_atomic_t s_fini_callback_returned;
 static aosl_atomic_t s_rtm_data_delivered;
 
+typedef struct {
+    char text[AGORA_RTM_DATA_MAX_LEN + 512];
+    unsigned calls;
+} payload_log_t;
+
+static payload_log_t s_rtm_data_log;
+static payload_log_t s_rtm_channel_log;
+static payload_log_t s_rtc_error_log;
+
+/* Install before workers start. Only rtc_mpq writes these captures; tests read
+ * them after synchronize_rtc(), which drains the preceding log calls. */
+static void capture_payload_log(int level, const char *format, va_list args) {
+    (void)level;
+    payload_log_t *log = NULL;
+    if (strstr(format, "[RTM] data received:")) {
+        log = &s_rtm_data_log;
+    } else if (strstr(format, "[RTM] channel data received:")) {
+        log = &s_rtm_channel_log;
+    } else if (strstr(format, "[RTC] error (code=")) {
+        log = &s_rtc_error_log;
+    }
+    if (log) {
+        int length = vsnprintf(log->text, sizeof(log->text), format, args);
+        assert(length >= 0 && (size_t)length < sizeof(log->text));
+        log->calls++;
+    } else {
+        vprintf(format, args);
+    }
+}
+
 #ifdef MYBOT_TEST_WRAP_RTC_ALLOC
 typedef struct {
     unsigned calls;
@@ -637,6 +667,43 @@ static void test_callback_payload_ownership(const mybot_agora_rtc_callbacks_t *c
         }
 #endif
     }
+
+    /* Error strings have no channel-name length limit and remain borrowed only
+     * until the vendor callback returns, just like RTM payloads. */
+    static char error_message[2049];
+    static char expected_error[sizeof(error_message)];
+    memset(error_message, 'e', sizeof(error_message) - 1);
+    error_message[sizeof(error_message) - 1] = '\0';
+    memcpy(expected_error, error_message, sizeof(error_message));
+    block_payload_owner(conn);
+    unsigned errors_before = s_rtc_error_log.calls;
+    s_handler.on_error(conn, -1, error_message);
+    memset(error_message, 'x', sizeof(error_message) - 1);
+    aosl_atomic_set(&s_release_state_callback, true);
+    synchronize_rtc();
+    assert(s_rtc_error_log.calls == errors_before + 1);
+    const char *logged_error = strstr(s_rtc_error_log.text, "[RTC] error (code=-1): ");
+    assert(logged_error != NULL);
+    logged_error += strlen("[RTC] error (code=-1): ");
+    assert(memcmp(logged_error, expected_error, sizeof(expected_error) - 1) == 0);
+    assert(strcmp(logged_error + sizeof(expected_error) - 1, "\n") == 0);
+    assert(s_last_state == MYBOT_RTC_STATE_ERROR);
+
+#ifdef MYBOT_TEST_WRAP_RTC_ALLOC
+    /* Failure to copy the error must free the already allocated event and leave
+     * the active connection untouched. LeakSanitizer also checks this path. */
+    block_payload_owner(conn);
+    errors_before = s_rtc_error_log.calls;
+    callback_allocation_fault_t error_fault = {.fail_at = 2};
+    assert(pthread_setspecific(s_allocation_fault_key, &error_fault) == 0);
+    s_handler.on_error(conn, -1, error_message);
+    assert(pthread_setspecific(s_allocation_fault_key, NULL) == 0);
+    assert(error_fault.failed);
+    aosl_atomic_set(&s_release_state_callback, true);
+    synchronize_rtc();
+    assert(s_rtc_error_log.calls == errors_before);
+    assert(s_last_state == MYBOT_RTC_STATE_CONNECTED);
+#endif
     assert(mybot_agora_rtc_leave() == 0);
     assert(mybot_agora_rtc_fini() == 0);
 }
@@ -675,6 +742,8 @@ static void test_rtm_callback_boundaries(const mybot_agora_rtc_callbacks_t *call
 
     int data_before = s_rtm_data_calls;
     int channel_data_before = s_rtm_subscribe_data_calls;
+    unsigned data_logs_before = s_rtm_data_log.calls;
+    unsigned channel_logs_before = s_rtm_channel_log.calls;
     s_rtm_handler.on_rtm_data(max_uid, payload, AGORA_RTM_DATA_MAX_LEN, RTM_MESSAGE_TYPE_STRING,
                               max_custom);
     s_rtm_handler.on_rtm_subscribe_data("boundary-room", max_uid, payload, AGORA_RTM_DATA_MAX_LEN,
@@ -689,6 +758,17 @@ static void test_rtm_callback_boundaries(const mybot_agora_rtc_callbacks_t *call
     assert(memcmp(s_last_rtm_subscribe_data, payload, AGORA_RTM_DATA_MAX_LEN) == 0);
     assert(strcmp(s_last_rtm_subscribe_uid, max_uid) == 0);
     assert(strcmp(s_last_rtm_custom_type, max_custom) == 0);
+    assert(s_rtm_data_log.calls == data_logs_before + 1);
+    assert(s_rtm_channel_log.calls == channel_logs_before + 1);
+    const char *data_log = strstr(s_rtm_data_log.text, " msg=");
+    const char *channel_log = strstr(s_rtm_channel_log.text, " msg=");
+    assert(data_log != NULL && channel_log != NULL);
+    data_log += strlen(" msg=");
+    channel_log += strlen(" msg=");
+    assert(memcmp(data_log, payload, AGORA_RTM_DATA_MAX_LEN) == 0);
+    assert(memcmp(channel_log, payload, AGORA_RTM_DATA_MAX_LEN) == 0);
+    assert(strcmp(data_log + AGORA_RTM_DATA_MAX_LEN, "\n") == 0);
+    assert(strcmp(channel_log + AGORA_RTM_DATA_MAX_LEN, "\n") == 0);
 
     /* Reject malformed borrowed fields without forwarding partial messages. */
     data_before = s_rtm_data_calls;
@@ -1125,6 +1205,7 @@ static void test_video_boundaries(const mybot_agora_rtc_callbacks_t *callbacks) 
 #endif
 
 int main(void) {
+    aosl_set_vlog_func(capture_payload_log);
 #ifdef MYBOT_TEST_WRAP_RTC_ALLOC
     int key_ret = pthread_key_create(&s_allocation_fault_key, NULL);
     assert(key_ret == 0);
@@ -1698,6 +1779,7 @@ int main(void) {
     join_rtm_login_thread();
     join_rtm_subscribe_thread();
     aosl_dtor();
+    aosl_set_vlog_func(NULL);
 #ifdef MYBOT_TEST_WRAP_RTC_ALLOC
     s_allocation_fault_key_ready = false;
     key_ret = pthread_key_delete(s_allocation_fault_key);
