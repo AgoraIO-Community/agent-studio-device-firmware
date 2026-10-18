@@ -431,7 +431,7 @@ Generate the ID as follows:
 
 For example, the six MAC bytes `02 00 00 12 34 56`, the ESP32 key above, and the prefix `ESP32`
 produce `ESP32-BF0C5C8DD323ED321F928C79`. The reference implementation is
-[build_device_id() at revision 3aa7d41](https://github.com/junlon2006/mybot-esp32/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35).
+[build_device_id() at revision 3aa7d41](https://github.com/AgoraIO-Community/agora-esp32-devkit/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35).
 Keep the prefix, derivation key, and MAC source unchanged across reboots and OTA updates to
 preserve device identity. The compiled derivation key is not an authentication credential.
 Within a chip namespace, the truncated digest is not a proof of collision-free uniqueness.

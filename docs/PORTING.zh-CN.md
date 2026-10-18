@@ -376,7 +376,7 @@ RTSA 生命周期通过 `agora_rtc_init()` / `agora_rtc_fini()` 管理。宿主�
 
 例如，MAC 原始字节 `02 00 00 12 34 56`、上述 ESP32 key 和前缀 `ESP32`
 生成 `ESP32-BF0C5C8DD323ED321F928C79`。参考源码见
-[3aa7d41 版本的 build_device_id()](https://github.com/junlon2006/mybot-esp32/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35)。
+[3aa7d41 版本的 build_device_id()](https://github.com/AgoraIO-Community/agora-esp32-devkit/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35)。
 重启和 OTA 后应保持前缀、派生 key 及 MAC 来源不变，保证设备身份稳定。
 编译进固件的派生 key 不是认证凭据。
 同一芯片命名空间内，截断摘要不是绝对无碰撞的证明。产品和设备注册系统须检查全局唯一性，
