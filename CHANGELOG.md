@@ -4,15 +4,18 @@ This project follows Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-19
+
 ### Added
 
+- Handle cloud MCP `audio.set_volume` and `audio.adjust_volume` DeviceCommand v1 actions inside
+  `message.user` envelopes with string `content`. Validate the active conversation and sender,
+  deduplicate the 16 most recently accepted command IDs, and use the existing hardware/software
+  playback volume path. `level` accepts integers from 0 to 100; `delta` accepts -100 to 100.
 - Document globally unique, stable product-generated device IDs using a chip prefix and the first
   24 hexadecimal characters of a MAC HMAC-SHA256 digest, with a maximum length of 32 characters
   and distinct chip prefixes isolating platform ID namespaces.
 - Document regional device-service addresses for mainland China and overseas deployments.
-- Handle cloud MCP `audio.set_volume` and `audio.adjust_volume` DeviceCommand v1 messages through
-  the existing RTM/control path with exact session checks and deduplication of the 16 most recently
-  accepted command IDs. Reuse hardware/software playback volume control.
 - Expand unit coverage for protocol boundaries, allocation failures, callback ownership,
   partial-start cleanup and recovery, including a standalone KV facade test and video-disabled
   lifecycle checks.
@@ -21,20 +24,12 @@ This project follows Semantic Versioning.
 
 ### Fixed
 
-- Accept observed `audio.adjust_volume` messages so positive and negative deltas raise and lower
-  playback volume through the existing bounded hardware/software path, applying each cached
-  command ID only once.
-- Decode `audio.set_volume` JSON strings inside the cloud's `message.user` envelope so MCP
-  volume commands reach the existing session-checked RTM command path.
 - Assert non-null arguments before dereferencing device-service mock inputs so whole-tree
   static analysis does not combine invalid-input tests with unchecked mocks in other test programs.
 - Move binding-status polling and single-attempt HTTPS stop notifications to a background service
   worker so slow requests do not delay local hangup or a new conversation trigger. Keep lifecycle
   state on the control worker, discard stale polling results, and drain background requests before
   releasing runtime resources. HTTPS adapters must support two independent concurrent connections.
-- Remove the UTC clock dependency from MCP device commands. `issued_at` and `expires_at` are
-  optional and currently ignored; a full command-ID cache replaces its oldest entry instead of
-  rejecting new commands.
 - Use atomic GCC coverage counters to prevent corrupt branch counts during concurrent worker
   and test execution.
 - Avoid overflow when combining JSON fractional scale with extreme negative exponents,
@@ -67,11 +62,8 @@ This project follows Semantic Versioning.
 
 - Use agent-studio-device-firmware in documentation and link to the official AgoraIO-Community
   firmware repositories.
-- Limit MCP parsing to observed `message.user` envelopes carrying `audio.set_volume` with integer
-  `level: 0..100` or `audio.adjust_volume` with integer `delta: -100..100`; remove mute, expression,
-  and bare-command handling.
 - Log complete RTM string messages and RTC error text without SDK-side preview limits.
-- Reuse consumer-owned PCM buffers during session flush, removing temporary drain allocations.
+- Reuse consumer-owned PCM buffers during session flush.
 - Increase the RTC queue capacity from 64 to 1000 pending calls while retaining nonblocking
   submission and the existing event handling.
 - Share RTM-to-LCD event queuing, session validation, and rendering for voiceprint and server-state
@@ -88,6 +80,8 @@ This project follows Semantic Versioning.
   retaining warning/error diagnostics for failures and invalid callbacks.
 - Set RTSA logging to `RTC_LOG_ERROR` and restore the previous AOSL log level after
   RTSA initialization, including when initialization fails.
+- Remove unsupported reference attribution from the porting guides and align HTTP reading and
+  JSON object parsing comments with their implementations.
 
 ### Removed
 
@@ -96,6 +90,22 @@ This project follows Semantic Versioning.
   [BK7258](https://github.com/AgoraIO-Community/agora-r1-devkit) and
   [BK7259](https://github.com/AgoraIO-Community/agora-r2-standard-devkit) projects. The SDK core and Linux reference
   implementation remain in this repository.
+
+### Compatibility
+
+- HTTPS platform operations on independent connection handles must support concurrent calls from
+  the control and background service workers.
+- The background service worker requests a 16 KiB stack. When all six SDK workers exist, their
+  requested stacks total 88 KiB; these are source-derived budgets, not measured stack usage. See
+  [the embedded integration notes](docs/EMBEDDED.md#threads-and-stacks).
+- Video platform operations run serially on the application control worker; encoded frame handlers
+  continue to run on the platform encoder task.
+- Product firmware owns network provisioning and credentials. Stop the SDK before entering
+  provisioning and start it after usable connectivity returns; Wi-Fi operations monitor that
+  product-owned connection.
+- MCP support is limited to the two volume actions above. Bare commands, mute actions, and
+  expression commands are not supported. Optional `issued_at` and `expires_at` fields are ignored;
+  the device command path does not require a UTC clock.
 
 ## [1.2.0] - 2026-09-15
 

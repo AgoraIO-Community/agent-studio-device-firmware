@@ -6,4 +6,4 @@
 
 > [English](SUPPORT.md) | 简体中文
 
-agent-studio-device-firmware 1.1 版本不附带支持 SLA。声网商业 SDK 或服务问题请走声网对应的支持渠道。
+agent-studio-device-firmware 不附带支持 SLA。声网商业 SDK 或服务问题请走声网对应的支持渠道。

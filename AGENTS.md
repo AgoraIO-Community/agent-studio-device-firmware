@@ -49,10 +49,12 @@ the platform performs capture and encoding.
   and AOSL, verify return values, synchronous versus asynchronous execution, buffer ownership,
   callback threads, and teardown behavior in implementation source. A prototype or demo alone is
   insufficient evidence.
-- The RTSA implementation is maintained separately under `iot-paas-package/rtc/iot-paas-sdk/rtsa/`.
-  Ask for its location if unavailable and needed. Check `rtc/rtc_service.c`, the relevant service
-  or logging implementation, and `include/api/agora_rtc_api.h`. Compare against the selected
-  package's headers and build metadata; do not assume a newer source checkout matches every binary.
+- For RTSA, inspect the [bundled API header](third_party/agora_rtsa_sdk/agora_sdk/include/agora_rtc_api.h),
+  [package metadata](third_party/agora_rtsa_sdk/PACKAGE_INFO), and
+  [build configuration](third_party/agora_rtsa_sdk/agora_sdk/.config). The package includes a prebuilt
+  library; it does not include RTSA implementation source. If a task requires implementation
+  evidence, request access to the matching source from the SDK maintainer and state what remains
+  unverified. Do not assume a newer source checkout matches the selected binary.
 - Keep OS and device APIs out of the core. Use AOSL for runtime services and the public platform
   operations for hardware. Identify a concrete AOSL limitation before proposing an OS-specific
   dependency.
