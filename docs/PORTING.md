@@ -2,7 +2,7 @@
 
 > [English](PORTING.md) | [简体中文](PORTING.zh-CN.md)
 
-This guide describes how to integrate mybot 1.2.0 into a product. Public API contracts,
+This guide describes how to integrate mybot 1.3.0 into a product. Public API contracts,
 including ownership and callback threading, are defined in
 [mybot.h](../include/mybot/mybot.h) and the
 [platform headers](../include/mybot/platform/). Public APIs and ABI follow Semantic Versioning.

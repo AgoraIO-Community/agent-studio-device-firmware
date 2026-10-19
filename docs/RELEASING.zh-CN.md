@@ -45,7 +45,7 @@ gzip 和 sha256sum。先获取发布 tag 与最新的 `origin/main`，并初始�
 ```sh
 git fetch origin main --tags
 git submodule update --init --recursive
-./scripts/release.sh package v1.2.0
+./scripts/release.sh package v1.3.0
 ```
 
 浅克隆需先执行 `git fetch --unshallow origin` 获取完整历史。脚本要求显式指定带注释 tag，
@@ -68,14 +68,14 @@ gzip 时间戳，使同一 tag 的重复打包结果一致。
 ## 发布
 
 - [ ] 确认现有 `v1.0.0` tag 仍指向历史 1.0.0 发布提交；绝不移动或覆盖已有发布 tag。
-- [ ] 在 `main` 分支创建与 `MYBOT_VERSION_STRING` 匹配的带注释发布 tag（例如 `v1.2.0`）。
+- [ ] 在 `main` 分支创建与 `MYBOT_VERSION_STRING` 匹配的带注释发布 tag（例如 `v1.3.0`）。
 - [ ] 推送 `main` 上的发布提交和对应带注释 tag，再按上面的步骤打包该 tag。
 - [ ] 仅在第三方授权审查后附加源码与二进制制品。
 - [ ] 附加生成的源码归档和校验和文件，并保留本地文件以便核验。
 - [ ] 将 GitHub release 发布为正式版（不标记为预发布）并列出已知限制。
 - [ ] 安装 GitHub CLI（`gh`）后核验已发布的资产：
 
-      `./scripts/release.sh verify v1.2.0`
+      `./scripts/release.sh verify v1.3.0`
 
 `verify TAG [OUTPUT_DIR]` 与 `package` 使用相同的默认输出目录。脚本下载 GitHub Release
 中对应名称的两个资产，将校验和文件及实际归档哈希与本地文件比较；允许发布页包含其他资产，
