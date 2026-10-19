@@ -6,5 +6,5 @@ sanitized logs, and a minimal reproduction. Use GitHub Discussions when enabled 
 
 > [English](SUPPORT.md) | [简体中文](SUPPORT.zh-CN.md)
 
-The agent-studio-device-firmware 1.1 release has no support SLA. Commercial Agora SDK or service
+agent-studio-device-firmware has no support SLA. Commercial Agora SDK or service
 questions belong in the applicable Agora support channel.
