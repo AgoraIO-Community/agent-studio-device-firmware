@@ -442,15 +442,14 @@ NUL-terminated input and does not enforce this product-side 32-character generat
 
 ### RTM account mapping
 
-The Agora RTM integration follows the xiaozhi reference flow. The device-service conversation
-response supplies a server-generated `rtc.uid` (also called `local_uid`) and, for point-to-point
-messages, a top-level `agent_uid`. The SDK uses `rtc.uid` unchanged as both the RTC user account
-and the local RTM UID. RTM token authentication uses a separate RTM credential; the current
-service response exposes `rtc.token`, so deployments must confirm that the service/app
-authentication mode accepts it for RTM or provide an RTM token through an extended service
-contract. The `agent_uid` value is the peer passed to `mybot_agora_rtc_send_rtm_data()`; the
-device ID is only the device-service identity and must not be substituted for either
-account.
+The device-service conversation response supplies a server-generated `rtc.uid` (also called
+`local_uid`) and, for point-to-point messages, a top-level `agent_uid`. The SDK uses `rtc.uid`
+unchanged as both the RTC user account and the local RTM UID. RTM token authentication uses a
+separate RTM credential; the current service response exposes `rtc.token`, so deployments must
+confirm that the service/app authentication mode accepts it for RTM or provide an RTM token through
+an extended service contract. The `agent_uid` value is the peer passed to
+`mybot_agora_rtc_send_rtm_data()`; the device ID is only the device-service identity and must not be
+substituted for either account.
 
 An RTM UID must be non-empty, shorter than 64 bytes, and contain only ASCII letters, digits, space,
 or the punctuation characters accepted by Agora. `mybot_agora_rtc_rtm_uid_is_valid()` exposes the
