@@ -12,7 +12,7 @@
 能力）、可选的设备视频上行、按键/LCD 工作流以及可选的本地唤醒词识别。平台相关能力通过一组小型 `ops` 接口注入，SDK 核心只依赖 C99 与 AOSL，理论上
 可移植到任意平台——Linux、RTOS 或裸机 MCU。
 
-> 当前版本为 **1.2.0**。仓库内置的 Agora RTSA 二进制与
+> 当前版本为 **1.3.0**。仓库内置的 Agora RTSA 二进制与
 > AOSL 有独立的许可及使用条件；用于产品前请阅读[许可证与第三方依赖](#许可证与第三方依赖)。
 
 ## 目录
@@ -145,7 +145,7 @@ ctest --test-dir build --output-on-failure
 ./build/examples/linux/mybot \
   --server https://botstation.shengwang.cn/api \
   --device-id ESP32-BF0C5C8DD323ED321F928C79 \
-  --fw-ver 1.2.0 \
+  --fw-ver 1.3.0 \
   --hw-model linux-reference
 ```
 

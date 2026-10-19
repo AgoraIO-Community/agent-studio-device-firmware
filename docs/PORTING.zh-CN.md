@@ -2,7 +2,7 @@
 
 > [English](PORTING.md) | 简体中文
 
-本文介绍如何将 mybot 1.2.0 集成到产品。接口契约、所有权和回调线程要求以
+本文介绍如何将 mybot 1.3.0 集成到产品。接口契约、所有权和回调线程要求以
 [mybot.h](../include/mybot/mybot.h) 与[平台公共头文件](../include/mybot/platform/)为准。
 公开 API 与 ABI 遵循语义化版本。平台代码必须只包含 `include/mybot` 下的头文件，
 并链接 `mybot::sdk`。
