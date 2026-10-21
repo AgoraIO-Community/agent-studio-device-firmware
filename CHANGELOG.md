@@ -4,6 +4,10 @@ This project follows Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- Refresh the Chinese and English pairing-code prompt and digit audio.
+
 ## [1.3.0] - 2026-10-19
 
 ### Added
