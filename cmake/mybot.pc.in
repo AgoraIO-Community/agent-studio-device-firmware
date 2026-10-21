@@ -5,7 +5,7 @@ includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 
 Name: mybot
 Description: Cross-platform AI voice-chat SDK for edge devices
-URL: https://github.com/junlon2006/mybot
+URL: https://github.com/AgoraIO-Community/agent-studio-device-firmware
 Version: @MYBOT_VERSION_STRING@
 Libs: -L${libdir} -lmybot_sdk -laosl
 Libs.private: -lpthread -ldl -lrt -lm
