@@ -1233,7 +1233,6 @@ int main(void) {
         .user_data = &s_callback_owner,
     };
 
-    /* RTM accounts follow the Agora/xiaozhi string UID contract. */
     assert(!mybot_agora_rtc_rtm_uid_is_valid(NULL));
     assert(!mybot_agora_rtc_rtm_uid_is_valid(""));
     assert(mybot_agora_rtc_rtm_uid_is_valid("device-uid 01"));
