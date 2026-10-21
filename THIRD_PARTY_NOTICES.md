@@ -45,41 +45,6 @@ also remain in force.
 `src/support/mybot_json.c` and `src/internal/mybot_json.h` are namespaced derivatives of cJSON.
 They retain the MIT license and Dave Gamble copyright notice in the source.
 
-## xiaozhi-esp32 announcement assets
-
-`assets/locales/` contains raw 16 kHz mono s16 PCM files decoded from the xiaozhi-esp32 project
-(https://github.com/78/xiaozhi-esp32), which is distributed under the MIT License
-(c) 2025 Shenzhen Xinzhi Future Technology Co., Ltd. and Project Contributors. The pairing-code
-prompt and digit sounds are derived from that project's `main/assets/locales/<locale>/*.ogg`
-assets. The full MIT notice is included below and must accompany any redistribution of these files.
-
-    MIT License
-
-    Copyright (c) 2025 Shenzhen Xinzhi Future Technology Co., Ltd.
-    Copyright (c) 2025 Project Contributors
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in all
-    copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-    SOFTWARE.
-
-The CMake install target installs this file as `share/doc/mybot/THIRD_PARTY_NOTICES.md`; it does not
-install the optional root `assets/` PCM files. A product that copies those assets must copy this
-notice with them.
-
 ## Release requirement
 
 Publish a release artifact containing the bundled Agora binary only after its license and written
