@@ -79,31 +79,9 @@
 
 ## 对话流程
 
-SDK 通过 Agora RTC 与云端 AI Agent 建立实时音频通道，并可上行编码视频，形成多模态交互回路：
-
-```mermaid
-flowchart LR
-    user["用户说话"] --> mic["麦克风 · 采集"]
-    mic --> up["Agora RTC 上行"]
-    camera["摄像头"] --> encode["平台编码器<br/>JPEG · H.264 · H.265"]
-    encode --> up
-    up --> agent["云端 AI Agent<br/>ASR · LLM · TTS · 视觉识别"]
-    agent --> down["Agora RTC 下行"]
-    down --> spk["扬声器 · 播放"]
-    spk --> reply["用户听到 AI 回复"]
-```
-
-- **上行**：设备麦克风采集 16 kHz PCM，经 Agora RTC 上行至云端 AI Agent。
-- **视觉上行（可选）**：平台采集并编码摄像头帧，SDK 经同一 RTC channel 转发给云端做视觉
-  识别；服务端不会向设备端下发视频。
-- **云端编排**：AI Agent 完成语音识别（ASR）、大模型理解与回答（LLM）、语音合成（TTS）。
-- **下行**：AI 回复音频经 Agora RTC 下行回到设备扬声器播放。
-- **会话调度**：设备服务端负责配对 / 认领，并为每次对话分配 RTC 频道。
-
-整条回路是**全双工**的：上行与下行同时进行，无需轮替发言。AI 回复期间用户随时可以说话
-**打断**——设备保持麦克风上行，云端 Agent 检测到用户输入后即中断回复并转听新指令。
-
-设备侧的音频链路与状态机实现见[系统架构](#系统架构)。
+设备通过 Agora RTC 上送 16 kHz PCM 和可选的平台编码视频。云端 Agent 负责 ASR、LLM、TTS
+和视觉识别，SDK 在本地播放返回音频。上行与下行同时运行，新语音可以打断正在播放的回复。
+设备服务客户端负责配对流程与会话请求；每次会话由服务端分配，服务端实现不属于本仓库。
 
 ## 快速开始
 
@@ -121,15 +99,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-### 设备服务地址
+### 设备服务配置
 
-按设备使用区域选择服务地址，通过 Linux 示例的 `--server` 或产品集成中的
-`mybot_config_t.server_base` 配置。地址包含 `/api`，末尾不带 `/`。
-
-| 区域 | 设备服务地址 |
-| --- | --- |
-| 国内 | `https://botstation.shengwang.cn/api` |
-| 海外 | `https://botstation.agora.io/api` |
+部署方通过 Linux 示例的 `--server` 或产品集成中的 `mybot_config_t.server_base` 提供设备服务
+基础地址。SDK 会校验 URL 并拼接设备服务路径；服务端实现不属于本仓库。SDK 消费的字段见
+[设备服务兼容性](docs/PORTING.zh-CN.md#设备服务兼容性)。
 
 `device_id` 是物理设备的全局唯一、稳定的设备唯一码。产品和设备注册系统须保证一个 ID
 仅对应一台设备。不同芯片平台使用不同且固定的型号前缀，完全隔离 ID 命名空间；即使摘要
@@ -139,11 +113,11 @@ ctest --test-dir build --output-on-failure
 完整 ID 最多 32 字符，不含结尾 NUL。输入与 key 的约定见
 [设备 ID 生成](docs/PORTING.zh-CN.md#设备-id-生成)。SDK 接收该 ID，不负责生成。
 
-使用国内服务运行示例：
+将 `MYBOT_SERVER_BASE` 设置为部署方提供的基础地址后运行：
 
 ```bash
 ./build/examples/linux/mybot \
-  --server https://botstation.shengwang.cn/api \
+  --server "$MYBOT_SERVER_BASE" \
   --device-id ESP32-BF0C5C8DD323ED321F928C79 \
   --fw-ver 1.3.0 \
   --hw-model linux-reference
@@ -354,64 +328,12 @@ flowchart TB
 - **外部服务**：设备服务端（配对 / 认领 / 会话调度，仅 HTTPS）、Agora RTC 云（实时音频和
   可选视频传输）与云端 AI Agent（语音识别 / 理解 / 合成 / 视觉识别）。
 
-### 线程模型
+### 执行模型
 
-应用控制、后台设备服务 HTTP、RTC、音频采集、播放和发送分别由独立线程负责。
-`service_mpq` 处理绑定状态轮询和停止通知，结果返回负责生命周期状态的 `control_mpq`。
-HTTPS 适配层需支持独立连接并发调用，可选的视频编码器任务由平台持有。
-线程与栈预算、动态分配和时序测量见 [EMBEDDED](docs/EMBEDDED.zh-CN.md)，平台回调契约以
-[公共头文件](include/mybot/platform/) 为准。
-
-### 工作流
-
-#### 设备状态机
-
-```mermaid
-stateDiagram-v2
-    [*] --> unprovisioned
-    unprovisioned --> pairing: 发起配对
-    pairing --> awaiting_claim: 获取配对码
-    awaiting_claim --> runtime: 设备被认领
-    runtime --> in_conversation: 会话开始
-    in_conversation --> runtime: 会话结束
-    runtime --> unprovisioned: 设备认证被拒
-    in_conversation --> unprovisioned: 设备认证被拒
-```
-
-设备认证被拒后回到 `unprovisioned`，并在下一个状态机 tick 自动重新发起配对。
-
-#### 音频数据流
-
-```mermaid
-flowchart LR
-    mic["麦克风"] -->|capture ops| cap["采集 worker (cap_mpq)"]
-    cap --> capbuf["采集环形缓冲"]
-    cap --> wake["本地唤醒词 · 空闲时"]
-    capbuf --> send["发送 worker (mybot_mpq)"]
-    send -->|ptime 帧| rtc_u["Agora RTC 上行"]
-
-    rtc_d["Agora RTC 下行"] --> pbbuf["播放环形缓冲"]
-    pbbuf --> pb["播放 worker (pb_mpq)"]
-    pb -->|playback ops| spk["扬声器"]
-    pb -.->|AEC 参考声道| send
-```
-
-`MYBOT_CLOUD_AEC=ON` 时，下行音频作为参考声道与麦克风交织后一起上行，由服务端消除回声。
-上行与下行同时运行（**全双工**）：AI 回复期间麦克风仍持续采集上行，这是云端 Agent 支持
-用户打断的基础。
-
-#### 多模态视频流
-
-```mermaid
-flowchart LR
-    camera["摄像头"] --> encoder["平台编码器"]
-    encoder -->|JPEG · H.264 · H.265| video["MyBot 视频 handler"]
-    video --> rtc_v["Agora RTC 视频上行"]
-    rtc_v --> vision["云端 AI 视觉识别"]
-```
-
-视频 handler 使用 RTSA 的目标码率回调，让平台编码器根据当前上行能力调整码率。设备只发送
-主视频流，远端视频订阅保持关闭。
+单一控制 owner 串行处理生命周期和界面操作；后台设备服务请求、RTC、采集、播放和音频发送
+分别使用独立 worker。平台回调所有权、启停顺序与验收要求见
+[PORTING.zh-CN.md](docs/PORTING.zh-CN.md)，线程预算与时序约束见
+[EMBEDDED.zh-CN.md](docs/EMBEDDED.zh-CN.md)。
 
 ## 仓库结构
 
@@ -453,8 +375,8 @@ mybot/
 
 ## 开发与验证
 
-单元测试覆盖服务响应格式错误、内存分配及启动失败、回调缓冲区所有权，以及关闭错误后的
-恢复行为。视频测试分别验证功能开启和关闭时的行为。内部 JSON 模块拒绝非有限数值和
+单元测试覆盖服务响应格式错误、内存分配及启动失败、回调缓冲区所有权，以及控制/service
+队列失败路径。视频测试分别验证功能开启和关闭时的行为。内部 JSON 模块拒绝非有限数值和
 `[-2^63, 2^63)` 范围外的浮点数，并在打印时保留解析得到的有符号 64 位整数精度。
 
 ```bash
@@ -490,9 +412,8 @@ find include src platforms/linux examples/linux tests -type f \
 组件的许可：
 
 - AOSL 带有其 `third_party/aosl/LICENSE` 中列出的附加条件。
-- Agora RTSA SDK 二进制受其软件许可、试用期和商业授权要求约束。仓库内置的 x86_64 Linux
-  二进制仅用于开发/演示；商业或生产使用与再分发需通过声网（Agora）销售渠道获取授权，
-  发布或转售前请先联系声网商务。
+- 仓库内置的 x86_64 Linux Agora RTSA 二进制仅用于开发/演示。软件包中未找到独立许可证；
+  在商业使用或再分发前必须确认授权。
 - `mybot_json` 派生自 cJSON，保留 MIT 许可声明。
 
 发布产品或重新分发前必须单独核实这些条款。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

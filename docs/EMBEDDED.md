@@ -10,16 +10,6 @@ Agora RTSA package; host figures are not MCU limits.
 
 ## Footprint
 
-The following is a historical x86_64 Linux snapshot recorded with GCC 13 and default optimization.
-The exact revision and complete build flags were not recorded; these values have not been
-remeasured for the current revision and are not release size guarantees.
-
-| Artifact | Previously recorded size |
-| --- | --- |
-| `libmybot_sdk.a` | ~490 KB |
-| `libaosl.a` | ~545 KB |
-| Minimal consumer binary (SDK core + AOSL + Agora RTSA, no Linux reference implementations) | text ~890 KB, data ~74 KB, bss ~19 KB |
-
 Measure on the target build, recording the revision, compiler, flags, feature configuration, and
 RTSA package alongside the results:
 
@@ -164,8 +154,7 @@ power and timing measurements; enabling it does not itself stop the playback or 
 - Routine RTM message/forwarding logs use `AOSL_LOG_DBG`; failures remain visible at warning/error
   levels. RTM string payloads and RTC error text are passed to logging in full. Measure log
   formatting and transport cost when enabling DEBUG, especially for payloads. Check the target
-  logging backend as well: the bundled BK725x AOSL HAL has a 512-byte formatting buffer, while
-  the Linux HAL prints directly.
+  logging backend and its buffer limits.
 - Pairing codes currently appear at NOTICE in the core and announcement logs. Account for that
   output in production log handling; do not add device tokens or other credentials to logs.
 
