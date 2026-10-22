@@ -2,7 +2,7 @@
 
 > [English](PORTING.md) | [简体中文](PORTING.zh-CN.md)
 
-This guide describes how to integrate mybot 1.3.0 into a product. Public API contracts,
+This guide describes how to integrate the current mybot release into a product. Public API contracts,
 including ownership and callback threading, are defined in
 [mybot.h](../include/mybot/mybot.h) and the
 [platform headers](../include/mybot/platform/). Public APIs and ABI follow Semantic Versioning.
@@ -406,6 +406,23 @@ cleared; an already queued HTTPS stop notification retains its original credenti
 A rejected device credential still restarts pairing; pair-code and RTC-token renewal retries are
 unaffected by the single-attempt stop policy.
 
+### Device-service compatibility
+
+The device service is external to this repository. The SDK appends these paths to
+`mybot_config_t.server_base` and consumes only the fields listed below:
+
+| Request | SDK behavior and consumed response fields |
+| --- | --- |
+| `POST /devices/pair-codes` | Unauthenticated; sends `device_id`, optional `firmware_version` and `hardware_model`; requires `data.code` and `data.pair_token`, with optional `data.poll_after_seconds`. |
+| `GET /devices/{device_id}/binding-status` | Uses `Pair` or `Device` authorization; consumes `data.status`, optional `data.device_token`, and `data.poll_after_seconds`. |
+| `POST /devices/{device_id}/conversations/start` | Uses `Device` authorization; sends `trigger: "button"`, the configured audio `p_time` and G722 codec, and configured feature flags; requires `data.conversation_id`, top-level `agent_uid`, and `data.rtc.app_id`, `channel`, and `uid`. `rtc.token` may be empty for a no-auth channel. |
+| `POST /devices/{device_id}/rtc-token` | Uses `Device` authorization; sends `channel` and `local_uid`; requires `data.rtc.channel`, `uid`, and `token`. |
+| `POST /devices/{device_id}/conversations/stop` | Uses `Device` authorization; sends `conversation_id` and `reason`; success requires a 2xx HTTP status. |
+
+For authenticated operations, HTTP 401, 403, and 409 responses are treated as
+device-authentication rejection. Other non-2xx responses fail the current request; retry behavior
+depends on the operation. The SDK does not parse server error-body codes.
+
 ### Device ID generation
 
 `mybot_config_t.device_id` is the globally unique identity of one physical device. Different
@@ -417,26 +434,12 @@ The chip prefix separates ID namespaces across chip platforms. Assign each platf
 fixed prefix, such as `ESP32`, `BK7258`, or `BK7259`; different platforms must not share a prefix.
 Even when their MAC addresses or digest suffixes match, the complete IDs remain different.
 
-Generate the ID as follows:
-
-1. Select the device's stable MAC address as the original six bytes, not a formatted string.
-   The ESP32 reference reads the Wi-Fi station MAC with `ESP_MAC_WIFI_STA`.
-2. Compute HMAC-SHA256 using a fixed platform derivation key. The ESP32 reference uses the
-   ASCII key `mybot-esp32-device-id-v1`, without its terminating NUL.
-3. Take the first 12 digest bytes and encode them as 24 uppercase hexadecimal characters.
-   The limit is 24 hexadecimal characters, not 24 bits or 24 bytes.
-4. Add the chip prefix and one `-`. Keep the prefix at most 7 ASCII characters, so the complete
-   ID is at most 32 characters, excluding NUL. A separate output buffer must hold at least
-   33 bytes, and generation must fail rather than truncate the result.
-
-For example, the six MAC bytes `02 00 00 12 34 56`, the ESP32 key above, and the prefix `ESP32`
-produce `ESP32-BF0C5C8DD323ED321F928C79`. The reference implementation is
-[build_device_id() at revision 3aa7d41](https://github.com/junlon2006/mybot-esp32/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35).
-Keep the prefix, derivation key, and MAC source unchanged across reboots and OTA updates to
-preserve device identity. The compiled derivation key is not an authentication credential.
-Within a chip namespace, the truncated digest is not a proof of collision-free uniqueness.
-The product and device registration system must check global uniqueness and reject conflicting registrations;
-the example ID must be replaced with the actual device's ID before deployment.
+Compute HMAC-SHA256 over a stable device identifier with a fixed platform derivation key, encode
+the first 12 digest bytes as 24 uppercase hexadecimal characters, and add the chip prefix and one
+`-`. A separate output buffer must hold at least 33 bytes; generation must fail rather than truncate.
+Keep the prefix, derivation key, and input identifier unchanged across reboots and OTA updates.
+The truncated digest is not a proof of collision-free uniqueness, so the product and registration
+system must reject conflicting IDs.
 The existing SDK buffer remains `device_id[64]`; its startup validation checks non-empty,
 NUL-terminated input and does not enforce this product-side 32-character generation rule.
 

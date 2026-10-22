@@ -1,6 +1,6 @@
 # 参与贡献
 
-欢迎为 1.3 版本系列贡献代码。公开 API 与 ABI 遵循语义化版本。
+欢迎贡献代码。公开 API 与 ABI 遵循语义化版本。
 
 > [English](CONTRIBUTING.md) | 简体中文
 
@@ -9,19 +9,16 @@
 1. 涉及 API、平台、依赖或协议的大型改动，请先在 issue 中讨论。
 2. 平台代码保持在 `src/` 之外，并通过公共平台 ops 集成。MCU 适配与固件在独立工程中维护；
    本仓库保留 Linux 参考实现。
-3. 绝不提交凭据、设备 token、客户数据或未经批准的专有 SDK 包。仓库中已有的
-   `third_party/agora_rtsa_sdk` 是明确声明的依赖；修改或替换它必须经过许可证与再分发审查。
+3. 绝不提交凭据、设备 token、客户数据或未经批准的专有 SDK 包。修改
+   `third_party/agora_rtsa_sdk` 中已有的 Agora RTSA 软件包必须经过许可证与再分发审查；
+   参见 `THIRD_PARTY_NOTICES.md`。
 4. 自维护的 C 源码遵循仓库根目录 `.clang-format`，并为每个文件标注 SPDX 许可证头
    （`/* SPDX-License-Identifier: Apache-2.0 */`；cJSON 派生的 `mybot_json` 源码使用 `MIT`）。
    机械重命名或批量编辑后，提交前先执行
    `find include src platforms/linux examples/linux tests -type f \( -name '*.c' -o -name '*.h'
    \) -exec clang-format -i {} +`。
-5. 提交 pull request 前先构建并测试（先初始化 AOSL submodule）：
-
-       git submodule update --init --recursive
-       cmake -S . -B build -DCONFIG_PLATFORM=linux -DMYBOT_ENABLE_ASAN=ON
-       cmake --build build -j
-       ctest --test-dir build --output-on-failure
+5. 提交 pull request 前按
+   [README：开发与验证](README.zh-CN.md#开发与验证)中的命令构建并测试。
 
 平台贡献必须通过 `docs/PORTING.md` 中的验收清单，并描述真实设备验证情况。涉及
 用户可见行为时，请同步更新公共文档与 `CHANGELOG.md`。
@@ -31,7 +28,7 @@ Pull request 应说明问题、设计、兼容性影响、测试与使用的硬�
 
 ## 提交信息
 
-使用 [Conventional Commits](https://www.conventionalcommits.org/) 以便发布与变更日志可以机械生成：
+使用 [Conventional Commits](https://www.conventionalcommits.org/) 以保持发布说明和变更日志一致：
 
     <type>[optional scope][!]: <subject>
 

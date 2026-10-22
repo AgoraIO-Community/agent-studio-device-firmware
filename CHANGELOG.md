@@ -7,6 +7,8 @@ This project follows Semantic Versioning.
 ### Changed
 
 - Refresh the Chinese and English pairing-code prompt and digit audio.
+- Remove stale external-platform, footprint, endpoint, and licensing details from the guides, and
+  document only the device-service fields consumed by this repository.
 
 ## [1.3.0] - 2026-10-19
 

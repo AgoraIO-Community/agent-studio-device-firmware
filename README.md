@@ -99,37 +99,11 @@ RTOS, or a bare-metal MCU.
 
 ## Conversation flow
 
-The SDK establishes a real-time audio channel and optional encoded video uplink to a cloud AI agent
-over Agora RTC, forming a multimodal interaction loop:
-
-```mermaid
-flowchart LR
-    user["User speaks"] --> mic["Microphone · capture"]
-    mic --> up["Agora RTC uplink"]
-    camera["Camera"] --> encode["Platform encoder<br/>JPEG · H.264 · H.265"]
-    encode --> up
-    up --> agent["Cloud AI agent<br/>ASR · LLM · TTS · vision"]
-    agent --> down["Agora RTC downlink"]
-    down --> spk["Speaker · playback"]
-    spk --> reply["User hears the AI reply"]
-```
-
-- **Uplink**: the device captures 16 kHz PCM from the microphone and sends it to the cloud AI agent
-  over Agora RTC.
-- **Visual uplink (optional)**: the platform captures and encodes camera frames; the SDK forwards
-  the encoded frames over the same RTC channel for cloud-side visual recognition. The server does
-  not send video back to the device.
-- **Cloud orchestration**: the AI agent performs speech recognition (ASR), language-model reasoning
-  and reply generation (LLM), and speech synthesis (TTS).
-- **Downlink**: the AI reply audio returns over Agora RTC and plays out on the device speaker.
-- **Session scheduling**: the device server handles pairing / claim and allocates the RTC channel for
-  each conversation.
-
-The loop is **full-duplex**: uplink and downlink run at the same time, with no turn-taking. The user
-can **interrupt** the AI at any point mid-reply — the device keeps the microphone streaming, and the
-cloud agent detects the new input, stops its reply, and listens for the new command.
-
-For the device-side audio pipeline and state machine, see [Architecture](#architecture).
+The device sends 16 kHz PCM and optional platform-encoded video over Agora RTC. The cloud agent
+handles ASR, LLM, TTS, and visual recognition, while the SDK plays returned audio locally. Uplink
+and downlink run concurrently, so a new user utterance can interrupt an active reply. The
+device-service client manages pairing and conversation requests; the service allocates each
+session and is not part of this repository.
 
 ## Quick start
 
@@ -147,15 +121,13 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-### Device-service addresses
+### Device-service configuration
 
-Choose the base URL for the device's region. Pass it through `--server` in the Linux example or
-`mybot_config_t.server_base` in a product integration, including `/api` without a trailing slash.
-
-| Region | Device-service base URL |
-| --- | --- |
-| Mainland China | `https://botstation.shengwang.cn/api` |
-| Overseas | `https://botstation.agora.io/api` |
+The deployment supplies the device-service base URL through `--server` in the Linux example or
+`mybot_config_t.server_base` in a product integration. The SDK validates the URL and appends the
+device-service paths; the server implementation is outside this repository. See
+[Device-service compatibility](docs/PORTING.md#device-service-compatibility) for the fields consumed
+by the SDK.
 
 `device_id` is the globally unique, stable identity of one physical device. Product and device
 registration systems must ensure that each ID belongs to exactly one device.
@@ -167,11 +139,11 @@ The chip prefix is at most 7 ASCII characters, so the complete ID is at most 32 
 excluding the terminating NUL. See [Device ID generation](docs/PORTING.md#device-id-generation)
 for the input and key rules. The SDK receives this ID; it does not generate it.
 
-Run the example with the overseas service:
+After setting `MYBOT_SERVER_BASE` to the base URL supplied by the deployment, run:
 
 ```bash
 ./build/examples/linux/mybot \
-  --server https://botstation.agora.io/api \
+  --server "$MYBOT_SERVER_BASE" \
   --device-id ESP32-BF0C5C8DD323ED321F928C79 \
   --fw-ver 1.3.0 \
   --hw-model linux-reference
@@ -400,68 +372,13 @@ Layer notes:
   Agora RTC cloud (real-time audio and optional video transport), and the cloud AI agent (speech
   recognition / understanding / synthesis / visual recognition).
 
-### Threading model
+### Execution model
 
-Application control, background device-service HTTP, RTC, capture, playback, and audio sending
-use separate workers. `service_mpq` handles binding-status polling and stop notifications; their
-results return to `control_mpq`, which owns lifecycle state. HTTPS adapters must support concurrent
-independent connections. The platform owns the optional video encoder task.
-For the thread/stack budget, dynamic allocations, and timing
-measurements, see [EMBEDDED](docs/EMBEDDED.md); platform callback contracts live in the
-[public headers](include/mybot/platform/).
-
-### Workflows
-
-#### Device state machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> unprovisioned
-    unprovisioned --> pairing: start pairing
-    pairing --> awaiting_claim: pair code received
-    awaiting_claim --> runtime: device claimed
-    runtime --> in_conversation: conversation starts
-    in_conversation --> runtime: conversation ends
-    runtime --> unprovisioned: auth rejected
-    in_conversation --> unprovisioned: auth rejected
-```
-
-When device authentication is rejected, the device returns to `unprovisioned` and automatically
-restarts pairing on the next state-machine tick.
-
-#### Audio data flow
-
-```mermaid
-flowchart LR
-    mic["Microphone"] -->|capture ops| cap["Capture worker (cap_mpq)"]
-    cap --> capbuf["Capture ring buffer"]
-    cap --> wake["Local wake words · when idle"]
-    capbuf --> send["Send worker (mybot_mpq)"]
-    send -->|ptime frames| rtc_u["Agora RTC uplink"]
-
-    rtc_d["Agora RTC downlink"] --> pbbuf["Playback ring buffer"]
-    pbbuf --> pb["Playback worker (pb_mpq)"]
-    pb -->|playback ops| spk["Speaker"]
-    pb -.->|AEC reference| send
-```
-
-With `MYBOT_CLOUD_AEC=ON`, the downlink audio is interleaved with the microphone signal as a
-reference channel and sent uplink together, letting the server cancel echo. The uplink and downlink
-run concurrently (**full-duplex**): the microphone keeps streaming during AI replies, which is what
-lets the cloud agent support user interruption.
-
-#### Multimodal video flow
-
-```mermaid
-flowchart LR
-    camera["Camera"] --> encoder["Platform encoder"]
-    encoder -->|JPEG · H.264 · H.265| video["MyBot video handler"]
-    video --> rtc_v["Agora RTC video uplink"]
-    rtc_v --> vision["Cloud AI visual recognition"]
-```
-
-The video handler uses RTSA's target-bitrate callback to let the platform encoder adapt to current
-uplink capacity. The device sends only the primary video stream; remote video subscription is off.
+One control owner serializes lifecycle and UI actions. Background device-service requests, RTC,
+capture, playback, and audio sending use separate workers. Platform callback ownership, startup and
+shutdown ordering, and acceptance requirements are defined in
+[PORTING](docs/PORTING.md); thread budgets and timing constraints are defined in
+[EMBEDDED](docs/EMBEDDED.md).
 
 ## Repository layout
 
@@ -505,7 +422,7 @@ projects linked below.
 ## Development and verification
 
 Unit tests exercise malformed service responses, allocation and startup failures, callback
-buffer ownership, and recovery after shutdown errors. Video tests run with the feature both
+buffer ownership, and control/service queue failure paths. Video tests run with the feature both
 enabled and disabled. The internal JSON helper rejects non-finite numbers and floating-point
 values outside `[-2^63, 2^63)`, and preserves parsed signed 64-bit integers when printing.
 
@@ -544,10 +461,8 @@ Our own code is released under the Apache License 2.0 in the root [LICENSE](LICE
 change the licensing of third-party components:
 
 - AOSL carries additional conditions listed in `third_party/aosl/LICENSE`.
-- The Agora RTSA SDK binary is subject to its software license, trial period, and commercial
-  licensing requirements. The bundled x86_64 Linux binary is for development/demo use only;
-  commercial or production use and redistribution require authorization from Agora (声网) — contact
-  Agora's sales channel before shipping or redistributing it.
+- The bundled x86_64 Linux Agora RTSA binary is for development/demo use only. No standalone
+  license was found in the package; confirm authorization before commercial use or redistribution.
 - `mybot_json` is derived from cJSON and retains the MIT license notice.
 
 Verify these terms independently before shipping or redistributing a product. See
