@@ -2,13 +2,13 @@
 
 > [English](PORTING.md) | [简体中文](PORTING.zh-CN.md)
 
-This guide describes how to integrate agent-studio-device-firmware 1.3.0 into a product. Public API contracts,
+This guide describes how to integrate the current SDK release into a product. Public API contracts,
 including ownership and callback threading, are defined in
 [mybot.h](../include/mybot/mybot.h) and the
 [platform headers](../include/mybot/platform/). Public APIs and ABI follow Semantic Versioning.
 Platform code must include only headers under `include/mybot` and link `mybot::sdk`.
 
-The SDK is designed to be portable to virtually any platform — Linux, an RTOS, or bare metal — as
+agent-studio-device-firmware is designed to be portable to virtually any platform — Linux, an RTOS, or bare metal — as
 long as AOSL has a `CONFIG_PLATFORM` port for it and an Agora RTSA library exists for the target
 ABI. The integration flow below applies regardless of the host operating system or silicon vendor.
 
@@ -316,8 +316,8 @@ consumed by `third_party/aosl` (e.g. `linux`, `esp32`); `MYBOT_BUILD_LINUX_PLATF
 bundled Linux reference implementations (`platforms/linux/`) and requires `CONFIG_PLATFORM=linux`. An MCU
 port keeps `MYBOT_BUILD_LINUX_PLATFORM=OFF`. A host may predefine an imported target named
 `agora-rtc-sdk`. Both source integration with `add_subdirectory()` and installed-package
-consumption via `find_package(mybot)` are supported. Source integration must initialize the SDK's
-nested AOSL submodule (`git submodule update --init --recursive` in the agent-studio-device-firmware checkout).
+consumption via `find_package(mybot)` are supported. Source integration must initialize this
+project's nested AOSL submodule (`git submodule update --init --recursive` in the project checkout).
 
 ## Step 6: Start and stop
 
@@ -347,7 +347,7 @@ while (mybot_is_running()) platform_sleep_ms(100);
 mybot_stop();
 ```
 
-Choose `server_base` from the [regional device-service addresses](../README.md#device-service-addresses),
+Choose `server_base` from the [regional device-service configuration](../README.md#device-service-configuration),
 including `/api` without a trailing slash. Generate `device_id` in the product layer according to
 [Device ID generation](#device-id-generation), keeping both fields NUL-terminated.
 `mybot_start()` sets up the SDK control worker and network listener; device services
@@ -406,6 +406,23 @@ cleared; an already queued HTTPS stop notification retains its original credenti
 A rejected device credential still restarts pairing; pair-code and RTC-token renewal retries are
 unaffected by the single-attempt stop policy.
 
+### Device-service compatibility
+
+The device service is external to this repository. The SDK appends these paths to
+`mybot_config_t.server_base` and consumes only the fields listed below:
+
+| Request | SDK behavior and consumed response fields |
+| --- | --- |
+| `POST /devices/pair-codes` | Unauthenticated; sends `device_id`, optional `firmware_version` and `hardware_model`; requires `data.code` and `data.pair_token`, with optional `data.poll_after_seconds`. |
+| `GET /devices/{device_id}/binding-status` | Uses `Pair` or `Device` authorization; consumes `data.status`, optional `data.device_token`, and `data.poll_after_seconds`. |
+| `POST /devices/{device_id}/conversations/start` | Uses `Device` authorization; sends `trigger: "button"`, the configured audio `p_time` and G722 codec, and configured feature flags; requires `data.conversation_id`, top-level `agent_uid`, and `data.rtc.app_id`, `channel`, and `uid`. `rtc.token` may be empty for a no-auth channel. |
+| `POST /devices/{device_id}/rtc-token` | Uses `Device` authorization; sends `channel` and `local_uid`; requires `data.rtc.channel`, `uid`, and `token`. |
+| `POST /devices/{device_id}/conversations/stop` | Uses `Device` authorization; sends `conversation_id` and `reason`; success requires a 2xx HTTP status. |
+
+For authenticated operations, HTTP 401, 403, and 409 responses are treated as
+device-authentication rejection. Other non-2xx responses fail the current request; retry behavior
+depends on the operation. The SDK does not parse server error-body codes.
+
 ### Device ID generation
 
 `mybot_config_t.device_id` is the globally unique identity of one physical device. Different
@@ -417,26 +434,12 @@ The chip prefix separates ID namespaces across chip platforms. Assign each platf
 fixed prefix, such as `ESP32`, `BK7258`, or `BK7259`; different platforms must not share a prefix.
 Even when their MAC addresses or digest suffixes match, the complete IDs remain different.
 
-Generate the ID as follows:
-
-1. Select the device's stable MAC address as the original six bytes, not a formatted string.
-   The ESP32 reference reads the Wi-Fi station MAC with `ESP_MAC_WIFI_STA`.
-2. Compute HMAC-SHA256 using a fixed platform derivation key. The ESP32 reference uses the
-   ASCII key `mybot-esp32-device-id-v1`, without its terminating NUL.
-3. Take the first 12 digest bytes and encode them as 24 uppercase hexadecimal characters.
-   The limit is 24 hexadecimal characters, not 24 bits or 24 bytes.
-4. Add the chip prefix and one `-`. Keep the prefix at most 7 ASCII characters, so the complete
-   ID is at most 32 characters, excluding NUL. A separate output buffer must hold at least
-   33 bytes, and generation must fail rather than truncate the result.
-
-For example, the six MAC bytes `02 00 00 12 34 56`, the ESP32 key above, and the prefix `ESP32`
-produce `ESP32-BF0C5C8DD323ED321F928C79`. The reference implementation is
-[build_device_id() at revision 3aa7d41](https://github.com/AgoraIO-Community/agora-esp32-devkit/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35).
-Keep the prefix, derivation key, and MAC source unchanged across reboots and OTA updates to
-preserve device identity. The compiled derivation key is not an authentication credential.
-Within a chip namespace, the truncated digest is not a proof of collision-free uniqueness.
-The product and device registration system must check global uniqueness and reject conflicting registrations;
-the example ID must be replaced with the actual device's ID before deployment.
+Compute HMAC-SHA256 over a stable device identifier with a fixed platform derivation key, encode
+the first 12 digest bytes as 24 uppercase hexadecimal characters, and add the chip prefix and one
+`-`. A separate output buffer must hold at least 33 bytes; generation must fail rather than truncate.
+Keep the prefix, derivation key, and input identifier unchanged across reboots and OTA updates.
+The truncated digest is not a proof of collision-free uniqueness, so the product and registration
+system must reject conflicting IDs.
 The existing SDK buffer remains `device_id[64]`; its startup validation checks non-empty,
 NUL-terminated input and does not enforce this product-side 32-character generation rule.
 

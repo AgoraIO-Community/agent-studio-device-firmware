@@ -2,12 +2,12 @@
 
 > [English](PORTING.md) | 简体中文
 
-本文介绍如何将 agent-studio-device-firmware 1.3.0 集成到产品。接口契约、所有权和回调线程要求以
+本文介绍如何将当前 SDK 版本集成到产品。接口契约、所有权和回调线程要求以
 [mybot.h](../include/mybot/mybot.h) 与[平台公共头文件](../include/mybot/platform/)为准。
 公开 API 与 ABI 遵循语义化版本。平台代码必须只包含 `include/mybot` 下的头文件，
 并链接 `mybot::sdk`。
 
-SDK 设计为可移植到几乎任意平台——Linux、RTOS 或裸机——只要 AOSL 有对应的
+agent-studio-device-firmware 设计为可移植到几乎任意平台——Linux、RTOS 或裸机——只要 AOSL 有对应的
 `CONFIG_PLATFORM` 移植、且目标 ABI 存在 Agora RTSA 库。无论宿主操作系统或芯片厂商如何，
 以下集成流程均适用。
 
@@ -276,7 +276,7 @@ target_link_libraries(device_firmware PRIVATE mybot::sdk my_mcu_platform)
 （`platforms/linux/`）并要求 `CONFIG_PLATFORM=linux`。MCU 移植保持
 `MYBOT_BUILD_LINUX_PLATFORM=OFF`。宿主可预定义名为 `agora-rtc-sdk` 的导入目标。本版本支持
 `add_subdirectory()` 源码集成，也支持通过 `find_package(mybot)` 消费已安装包。源码集成需先
-初始化 SDK 的嵌套 AOSL submodule（在 agent-studio-device-firmware 检出目录执行
+初始化 mybot 的嵌套 AOSL submodule（在 mybot 检出目录执行
 `git submodule update --init --recursive`）。
 
 ## 第 6 步：启动与停止
@@ -304,7 +304,7 @@ while (mybot_is_running()) platform_sleep_ms(100);
 mybot_stop();
 ```
 
-从 [README 的设备服务地址](../README.zh-CN.md#设备服务地址)中选择 `server_base`，
+从 [README 的设备服务配置](../README.zh-CN.md#设备服务配置)中选择 `server_base`，
 保留 `/api` 且末尾不带 `/`。产品层按[设备 ID 生成](#设备-id-生成)规则生成 `device_id`，
 并保证两个字段均以 NUL 结尾。`mybot_start()` 建立 SDK 控制线程与网络监听，
 首次收到已连接事件后才启动设备服务。
@@ -353,6 +353,22 @@ RTSA 生命周期通过 `agora_rtc_init()` / `agora_rtc_fini()` 管理。宿主�
 设备凭据被拒绝时仍重新进入配对流程；配对码申请
 和 RTC token 续期的重试不受停止通知仅发送一次的策略影响。
 
+### 设备服务兼容性
+
+设备服务实现不属于本仓库。SDK 在 `mybot_config_t.server_base` 后拼接以下路径，并且只消费
+下列响应字段：
+
+| 请求 | SDK 行为与消费的响应字段 |
+| --- | --- |
+| `POST /devices/pair-codes` | 无鉴权；发送 `device_id`、可选 `firmware_version` 和 `hardware_model`；要求 `data.code`、`data.pair_token`，可选 `data.poll_after_seconds`。 |
+| `GET /devices/{device_id}/binding-status` | 使用 `Pair` 或 `Device` 授权；消费 `data.status`、可选 `data.device_token` 和 `data.poll_after_seconds`。 |
+| `POST /devices/{device_id}/conversations/start` | 使用 `Device` 授权；发送 `trigger: "button"`、配置的音频 `p_time` 和 G722 codec，以及配置的特性开关；要求 `data.conversation_id`、顶层 `agent_uid`，以及 `data.rtc.app_id`、`channel`、`uid`。无鉴权 channel 的 `rtc.token` 可以为空。 |
+| `POST /devices/{device_id}/rtc-token` | 使用 `Device` 授权；发送 `channel`、`local_uid`；要求 `data.rtc.channel`、`uid`、`token`。 |
+| `POST /devices/{device_id}/conversations/stop` | 使用 `Device` 授权；发送 `conversation_id`、`reason`；HTTP 2xx 即视为成功。 |
+
+对于需要认证的操作，HTTP 401、403、409 视为设备认证失效。其他非 2xx 响应使当前请求失败；
+是否重试由具体操作决定。SDK 不解析服务端错误体中的错误码。
+
 ### 设备 ID 生成
 
 `mybot_config_t.device_id` 是物理设备的全局唯一标识：不同设备使用不同 ID，同一设备在
@@ -363,24 +379,11 @@ RTSA 生命周期通过 `agora_rtc_init()` / `agora_rtc_fini()` 管理。宿主�
 例如 `ESP32`、`BK7258`、`BK7259`，禁止不同平台复用同一前缀。即使 MAC 地址或摘要后缀
 相同，完整设备 ID 也不会重复。
 
-生成步骤如下：
-
-1. 选择设备稳定 MAC 地址，使用原始 6 字节，不使用格式化字符串。
-   ESP32 参考实现通过 `ESP_MAC_WIFI_STA` 读取 Wi-Fi STA MAC。
-2. 使用固定的平台派生 key 计算 HMAC-SHA256。ESP32 参考实现的 ASCII key 为
-   `mybot-esp32-device-id-v1`，不包含结尾 NUL。
-3. 取摘要前 12 字节，编码成 24 个大写十六进制字符。
-   这里的 24 位指十六进制字符数量，不是 24 bit 或 24 字节。
-4. 拼接芯片型号前缀和一个 `-`。前缀最多 7 个 ASCII 字符，完整 ID 最多 32 字符，
-   不含结尾 NUL。独立输出缓冲区至少 33 字节；生成失败时应返回错误，不能截断。
-
-例如，MAC 原始字节 `02 00 00 12 34 56`、上述 ESP32 key 和前缀 `ESP32`
-生成 `ESP32-BF0C5C8DD323ED321F928C79`。参考源码见
-[3aa7d41 版本的 build_device_id()](https://github.com/AgoraIO-Community/agora-esp32-devkit/blob/3aa7d41f98f57b12d5a486f4e4f3ff646fbb073b/main/app_main.c#L35)。
-重启和 OTA 后应保持前缀、派生 key 及 MAC 来源不变，保证设备身份稳定。
-编译进固件的派生 key 不是认证凭据。
-同一芯片命名空间内，截断摘要不是绝对无碰撞的证明。产品和设备注册系统须检查全局唯一性，
-拒绝冲突注册；正式部署前应将示例 ID 替换为实际设备的 ID。
+使用稳定的设备标识和固定的平台派生 key 计算 HMAC-SHA256，取摘要前 12 字节编码成
+24 个大写十六进制字符，再拼接芯片型号前缀和一个 `-`。独立输出缓冲区至少 33 字节；
+生成失败时应返回错误，不能截断。
+重启和 OTA 后应保持前缀、派生 key 及输入标识不变。截断摘要不是绝对无碰撞的证明，
+产品和设备注册系统必须拒绝冲突 ID。
 SDK 现有缓冲区仍为 `device_id[64]`；启动校验检查非空和 NUL 结尾，
 并未强制校验这条产品侧的 32 字符生成规则。
 

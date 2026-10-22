@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions are welcome for the 1.3 release series. Public APIs and ABI follow Semantic Versioning.
+Contributions are welcome. Public APIs and ABI follow Semantic Versioning.
 
 > [English](CONTRIBUTING.md) | [简体中文](CONTRIBUTING.zh-CN.md)
 
@@ -10,19 +10,15 @@ Contributions are welcome for the 1.3 release series. Public APIs and ABI follow
 2. Keep platform code outside `src/` and integrate it through public platform ops. Maintain MCU
    adapters and firmware in their independent projects; this repository keeps the Linux reference.
 3. Never commit credentials, device tokens, customer data, or unapproved proprietary SDK packages.
-   The pinned Agora RTSA package already present under `third_party/agora_rtsa_sdk` is an explicit
-   repository dependency; changes or replacements require license and redistribution review.
+   Changes to the existing Agora RTSA package under `third_party/agora_rtsa_sdk` require license
+   and redistribution review; see `THIRD_PARTY_NOTICES.md`.
 4. Format self-maintained C sources with the repository `.clang-format` and tag every file with an
    SPDX license header (`/* SPDX-License-Identifier: Apache-2.0 */`; the cJSON-derived `mybot_json`
    sources use `MIT`). After mechanical renames or bulk edits, run
    `find include src platforms/linux examples/linux tests -type f \( -name '*.c' -o -name '*.h'
    \) -exec clang-format -i {} +` before committing.
-5. Build and test before opening a pull request (initialize the AOSL submodule first):
-
-       git submodule update --init --recursive
-       cmake -S . -B build -DCONFIG_PLATFORM=linux -DMYBOT_ENABLE_ASAN=ON
-       cmake --build build -j
-       ctest --test-dir build --output-on-failure
+5. Build and test before opening a pull request using the commands in
+   [README: Development and verification](README.md#development-and-verification).
 
 Platform contributions must complete the checklist in `docs/PORTING.md` and describe real-device
 validation. Update public documentation and `CHANGELOG.md` for user-visible behavior.
@@ -33,8 +29,8 @@ unless the file clearly carries its own compatible license.
 
 ## Commit messages
 
-Use [Conventional Commits](https://www.conventionalcommits.org/) so releases and the changelog can
-be derived mechanically:
+Use [Conventional Commits](https://www.conventionalcommits.org/) so release notes and changelog
+entries stay consistent:
 
     <type>[optional scope][!]: <subject>
 
