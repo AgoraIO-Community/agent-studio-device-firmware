@@ -243,69 +243,79 @@ SDK 采用分层架构：宿主应用通过公共 API 驱动核心，核心模�
 云端 AI Agent 是运行时依赖的外部服务，均不在本仓库内。
 
 ```mermaid
-flowchart TB
-    subgraph host["宿主应用"]
-        host_app["设备固件 / Linux 示例应用"]
+flowchart LR
+    subgraph product["产品"]
+        host["宿主应用"]
     end
 
-    subgraph api["公共 API · include/mybot"]
-        api_h["mybot_start / mybot_is_running / mybot_stop<br/>mybot_get_state"]
+    subgraph api["公共 API"]
+        api_h["mybot_start / mybot_stop<br/>mybot_get_state"]
     end
 
-    subgraph core["SDK 核心 · src/"]
-        app_c["mybot_app<br/>启动编排 · 事件分发 · 线程管理"]
-        app_state["应用状态模型<br/>阶段 · 连接状态 · 设备状态投影"]
-        presenter["LCD presenter<br/>状态投影 · 语义界面"]
-        state_m["设备状态机<br/>配对 · 认领 · 会话生命周期"]
-        svc_c["设备服务客户端<br/>配对 / claim / 会话轮询"]
-        rtc_c["RTC 会话<br/>Agora RTSA 封装"]
-        media_c["音频管线<br/>环形缓冲 · AEC 参考 · 唤醒词"]
-        video_c["视频上行<br/>平台编码器桥接"]
+    subgraph core["SDK 核心"]
+        direction TB
+        app_c["应用控制<br/>control_mpq"]
+        state["状态模型"]
+        lifecycle["设备生命周期"]
+        client["设备服务客户端<br/>service_mpq"]
+        presenter["LCD presenter"]
+        rtc["Agora RTC 封装<br/>rtc_mpq"]
+        media["音频管线<br/>采集 · 播放 · 发送"]
+        video["视频桥接"]
     end
 
-    subgraph infra["基础服务层"]
-        aosl["AOSL<br/>MPQ 线程 · 定时器 · 原子 · 日志"]
-        ops["平台 ops 契约<br/>wifi · kv_store · key · lcd<br/>audio · video · https · announce · asr"]
+    subgraph runtime["可移植运行边界"]
+        direction TB
+        aosl["AOSL<br/>线程 · MPQ · 定时器 · 内存"]
+        ops["平台 ops<br/>网络 · 存储 · 音频 · 视频 · TLS"]
     end
 
-    subgraph plat["平台实现"]
-        linux_b["Linux 参考实现<br/>ALSA · stdin · file · console · OpenSSL"]
-        mcu_b["MCU 平台实现 · 宿主提供"]
+    subgraph platforms["平台适配"]
+        linux["Linux 参考实现"]
+        mcu["MCU 适配层"]
     end
 
-    subgraph ext["外部服务 · 云端"]
-        svc_e["设备服务端<br/>配对 · 认领 · 会话调度 (HTTPS)"]
-        agora_e["Agora RTC 云"]
-        agent_e["AI Agent<br/>ASR · LLM · TTS"]
+    subgraph cloud["外部服务"]
+        server["设备服务端"]
+        agora["Agora RTC"]
+        agent["云端 AI Agent"]
     end
 
-    host_app --> api_h
+    host --> api_h
     api_h --> app_c
-    api_h --> app_state
-    app_c --> state_m
-    app_c --> app_state
-    state_m --> app_state
-    app_state --> presenter
-    app_c --> media_c
-    app_c --> video_c
-    state_m --> svc_c
-    svc_c --> rtc_c
-    rtc_c <--> media_c
-    app_c --> aosl
-    app_c --> ops
+    api_h -. 读取状态 .-> state
+
+    app_c --> state
+    app_c --> lifecycle
+    app_c --> presenter
+    app_c --> rtc
+    app_c --> media
+    app_c --> video
+    lifecycle --> client
+    state --> presenter
+    rtc <-->|音频| media
+
+    app_c -->|所有 worker| aosl
+    client --> ops
+    media --> ops
+    video --> ops
     presenter --> ops
-    svc_c --> aosl
-    rtc_c --> aosl
-    media_c --> aosl
-    video_c --> aosl
-    video_c --> ops
-    ops --> linux_b
-    ops --> mcu_b
-    svc_c -->|HTTPS 轮询| svc_e
-    rtc_c -->|实时音频| agora_e
-    video_c -->|编码视频上行| agora_e
-    agora_e <--> agent_e
-    svc_e -->|调度会话| agent_e
+    ops --> linux
+    ops --> mcu
+
+    client -->|HTTPS| server
+    rtc <-->|音频| agora
+    video -->|编码视频| agora
+    agora <--> agent
+
+    classDef entry fill:#eef6ff,stroke:#4f8cc9,color:#10233b;
+    classDef coreNode fill:#f8fafc,stroke:#64748b,color:#111827;
+    classDef runtimeNode fill:#eefbf4,stroke:#3c9b6b,color:#10231a;
+    classDef externalNode fill:#fff5eb,stroke:#d98324,color:#2b1808;
+    class host,api_h entry;
+    class app_c,state,lifecycle,client,presenter,rtc,media,video coreNode;
+    class aosl,ops,linux,mcu runtimeNode;
+    class server,agora,agent externalNode;
 ```
 
 分层说明：
