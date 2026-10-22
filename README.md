@@ -280,69 +280,79 @@ platform differences are absorbed by the platform implementations. The device se
 and the cloud AI agent are runtime external dependencies and are not part of this repository.
 
 ```mermaid
-flowchart TB
-    subgraph host["Host application"]
-        host_app["Device firmware / Linux example"]
+flowchart LR
+    subgraph product["Product"]
+        host["Host application"]
     end
 
-    subgraph api["Public API · include/mybot"]
-        api_h["mybot_start / mybot_is_running / mybot_stop<br/>mybot_get_state"]
+    subgraph api["Public API"]
+        api_h["mybot_start / mybot_stop<br/>mybot_get_state"]
     end
 
-    subgraph core["SDK core · src/"]
-        app_c["mybot_app<br/>startup orchestration · event dispatch · threads"]
-        app_state["Application state model<br/>phase · connectivity · device projection"]
-        presenter["LCD presenter<br/>state projection · semantic screens"]
-        state_m["Device state machine<br/>pairing · claim · conversation lifecycle"]
-        svc_c["Device-service client<br/>pair / claim / conversation polling"]
-        rtc_c["Agora RTC<br/>RTSA wrapper"]
-        media_c["Audio pipeline<br/>ring buffers · AEC reference · wake words"]
-        video_c["Video uplink<br/>platform encoder bridge"]
+    subgraph core["SDK core"]
+        direction TB
+        app_c["Application control<br/>control_mpq"]
+        state["State model"]
+        lifecycle["Device lifecycle"]
+        client["Device-service client<br/>service_mpq"]
+        presenter["LCD presenter"]
+        rtc["Agora RTC wrapper<br/>rtc_mpq"]
+        media["Audio pipeline<br/>capture · playback · send"]
+        video["Video bridge"]
     end
 
-    subgraph infra["Foundation layer"]
-        aosl["AOSL<br/>MPQ threads · timers · atomics · logging"]
-        ops["Platform ops contract<br/>wifi · kv_store · key · lcd<br/>audio · video · https · announce · asr"]
+    subgraph runtime["Portability boundary"]
+        direction TB
+        aosl["AOSL<br/>threads · MPQ · timers · memory"]
+        ops["Platform ops<br/>network · storage · audio · video · TLS"]
     end
 
-    subgraph plat["Platform implementations"]
-        linux_b["Linux reference<br/>ALSA · stdin · file · console · OpenSSL"]
-        mcu_b["MCU implementation · host-provided"]
+    subgraph platforms["Platform adapters"]
+        linux["Linux reference"]
+        mcu["MCU adapter"]
     end
 
-    subgraph ext["External services · cloud"]
-        svc_e["Device server<br/>pairing · claim · session scheduling (HTTPS)"]
-        agora_e["Agora RTC cloud"]
-        agent_e["AI agent<br/>ASR · LLM · TTS"]
+    subgraph cloud["External services"]
+        server["Device service"]
+        agora["Agora RTC"]
+        agent["Cloud AI agent"]
     end
 
-    host_app --> api_h
+    host --> api_h
     api_h --> app_c
-    api_h --> app_state
-    app_c --> state_m
-    app_c --> app_state
-    state_m --> app_state
-    app_state --> presenter
-    app_c --> media_c
-    app_c --> video_c
-    state_m --> svc_c
-    svc_c --> rtc_c
-    rtc_c <--> media_c
-    app_c --> aosl
-    app_c --> ops
+    api_h -. read state .-> state
+
+    app_c --> state
+    app_c --> lifecycle
+    app_c --> presenter
+    app_c --> rtc
+    app_c --> media
+    app_c --> video
+    lifecycle --> client
+    state --> presenter
+    rtc <-->|audio| media
+
+    app_c -->|all workers| aosl
+    client --> ops
+    media --> ops
+    video --> ops
     presenter --> ops
-    svc_c --> aosl
-    rtc_c --> aosl
-    media_c --> aosl
-    video_c --> aosl
-    video_c --> ops
-    ops --> linux_b
-    ops --> mcu_b
-    svc_c -->|HTTPS polling| svc_e
-    rtc_c -->|real-time audio| agora_e
-    video_c -->|encoded video uplink| agora_e
-    agora_e <--> agent_e
-    svc_e -->|schedules session| agent_e
+    ops --> linux
+    ops --> mcu
+
+    client -->|HTTPS| server
+    rtc <-->|audio| agora
+    video -->|encoded video| agora
+    agora <--> agent
+
+    classDef entry fill:#eef6ff,stroke:#4f8cc9,color:#10233b;
+    classDef coreNode fill:#f8fafc,stroke:#64748b,color:#111827;
+    classDef runtimeNode fill:#eefbf4,stroke:#3c9b6b,color:#10231a;
+    classDef externalNode fill:#fff5eb,stroke:#d98324,color:#2b1808;
+    class host,api_h entry;
+    class app_c,state,lifecycle,client,presenter,rtc,media,video coreNode;
+    class aosl,ops,linux,mcu runtimeNode;
+    class server,agora,agent externalNode;
 ```
 
 Layer notes:
