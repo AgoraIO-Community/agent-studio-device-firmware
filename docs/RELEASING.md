@@ -48,7 +48,8 @@ gzip, and sha256sum. Fetch the release tag and current `origin/main`, and initia
 ```sh
 git fetch origin main --tags
 git submodule update --init --recursive
-./scripts/release.sh package v1.3.0
+TAG=vX.Y.Z  # replace with the release tag
+./scripts/release.sh package "$TAG"
 ```
 
 For a shallow clone, fetch the complete history first with `git fetch --unshallow origin`.
@@ -72,17 +73,17 @@ packaging of the same tag is reproducible.
 
 ## Publish
 
-- [ ] Confirm the existing `v1.0.0` tag still points to the historical 1.0.0 release; never move
-      or overwrite an existing release tag.
-- [ ] Create an annotated release tag matching `MYBOT_VERSION_STRING` (e.g. `v1.3.0`) on `main`.
+- [ ] Confirm the target tag does not already exist; never move or overwrite an existing release tag.
+- [ ] Create an annotated release tag matching `MYBOT_VERSION_STRING` on `main`.
 - [ ] Push the release commit on `main` and its annotated tag, then package that tag as above.
-- [ ] Attach source and binary artifacts only after third-party authorization review.
+- [ ] Attach the generated source assets only after third-party terms review. Do not attach packaged
+      RTSA binaries unless a separate authorized process produces them.
 - [ ] Attach the generated source archive and checksum file. Keep the local files for verification.
 - [ ] Publish the GitHub release as a stable release (not marked as a prerelease) and list
       known limitations.
 - [ ] Verify the published assets with GitHub CLI (`gh`) installed:
 
-      `./scripts/release.sh verify v1.3.0`
+      `./scripts/release.sh verify "$TAG"`
 
 `verify TAG [OUTPUT_DIR]` uses the same output directory convention as `package`. It downloads the
 two named GitHub Release assets and compares the checksum file and actual archive hash with the
