@@ -349,7 +349,6 @@ static const char *state_name(mybot_rtc_state_t state) {
     return "?";
 }
 
-/* All state transitions and application callbacks run on the RTC MPQ worker. */
 static void set_state(mybot_rtc_state_t state) {
     if (s_rtc.state == state) {
         return;
@@ -981,8 +980,7 @@ static void process_token_will_expire(connection_id_t conn_id, const char *token
     }
 }
 
-/* RTSA invokes these handlers on its callback worker. They only copy the
- * borrowed callback arguments and enqueue a non-blocking event for rtc_mpq. */
+/* Copy borrowed RTSA callback arguments, then enqueue them for rtc_mpq. */
 static void on_rtm_event(const char *uid, rtm_event_type_e type, rtm_err_code_e error) {
     bool enabled;
     bool login_requested;
