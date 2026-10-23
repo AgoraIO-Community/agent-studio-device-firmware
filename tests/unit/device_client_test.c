@@ -1057,6 +1057,11 @@ int main(void) {
     assert(mybot_device_client_renew_rtc_token("http://server", "device-1", "token\nInjected",
                                                "channel-1", "device-uid", &renewed) < 0);
     assert(s_post_ex_call_count == post_calls);
+    assert(mybot_device_client_renew_rtc_token("http://server", "device-1", "token\trest",
+                                               "channel-1", "device-uid", &renewed) < 0);
+    assert(mybot_device_client_renew_rtc_token("http://server", "device-1", "token\x80rest",
+                                               "channel-1", "device-uid", &renewed) < 0);
+    assert(s_post_ex_call_count == post_calls);
 
     mybot_device_binding_t binding;
     assert(mybot_device_client_get_binding_status("http://server", "device-1",

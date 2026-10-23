@@ -14,12 +14,7 @@ typedef struct {
     bool active;
 } mybot_lcd_t;
 
-/**
- * SDK-internal LCD facade. The public mybot/platform/mybot_lcd.h only exposes
- * the platform contract (ops table + mybot_platform_register()); the SDK core drives
- * the registered implementation through the functions below. All calls are serialized by the
- * application control owner.
- */
+/* All LCD calls are serialized by the application control owner. */
 
 /** Return whether the current platform registered an LCD implementation. */
 bool mybot_lcd_is_registered(void);
