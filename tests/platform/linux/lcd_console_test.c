@@ -24,7 +24,9 @@ int main(void) {
 
     for (int screen = MYBOT_LCD_SCREEN_STARTING; screen < MYBOT_LCD_SCREEN_COUNT; ++screen) {
         if (screen != MYBOT_LCD_SCREEN_PAIR_CODE) {
-            assert(mybot_lcd_show_screen(&lcd, (mybot_lcd_screen_t)screen) == 0);
+            mybot_lcd_content_t content = {0};
+            content.screen = (mybot_lcd_screen_t)screen;
+            assert(mybot_lcd_show_content(&lcd, &content) == 0);
         }
     }
     assert(mybot_lcd_show_pair_code(&lcd, "123456") == 0);

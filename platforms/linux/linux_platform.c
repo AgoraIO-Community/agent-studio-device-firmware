@@ -16,7 +16,7 @@ int linux_platform_register(void) {
         .audio_volume = linux_audio_platform_alsa_volume_ops(),
         .lcd = linux_lcd_platform_console_ops(),
         .announce = linux_announce_platform_file_ops(),
-#if MYBOT_LINUX_HTTPS_OPENSSL
+#if MYBOT_ENABLE_HTTPS
         .https = linux_https_platform_openssl_ops(),
 #endif
     };

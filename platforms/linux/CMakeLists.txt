@@ -9,11 +9,7 @@ add_library(mybot_platform_linux STATIC
     linux_lcd_console.c
     linux_wifi_host_network.c
 )
-option(MYBOT_LINUX_HTTPS_OPENSSL "Use OpenSSL for the Linux HTTPS transport" ${MYBOT_ENABLE_HTTPS})
-if(MYBOT_LINUX_HTTPS_OPENSSL AND NOT MYBOT_ENABLE_HTTPS)
-    message(FATAL_ERROR "MYBOT_LINUX_HTTPS_OPENSSL requires MYBOT_ENABLE_HTTPS=ON")
-endif()
-if(MYBOT_LINUX_HTTPS_OPENSSL)
+if(MYBOT_ENABLE_HTTPS)
     find_package(OpenSSL REQUIRED)
     target_sources(mybot_platform_linux PRIVATE linux_https_openssl.c)
 endif()
@@ -24,10 +20,7 @@ target_link_libraries(mybot_platform_linux
     PUBLIC mybot::sdk
     PRIVATE aosl asound pthread dl rt m
 )
-target_compile_definitions(mybot_platform_linux PRIVATE
-    MYBOT_LINUX_HTTPS_OPENSSL=$<BOOL:${MYBOT_LINUX_HTTPS_OPENSSL}>
-)
-if(MYBOT_LINUX_HTTPS_OPENSSL)
+if(MYBOT_ENABLE_HTTPS)
     target_link_libraries(mybot_platform_linux PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 endif()
 mybot_enable_sanitizers(mybot_platform_linux)

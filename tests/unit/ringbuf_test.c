@@ -98,14 +98,9 @@ static void test_single_byte(void) {
     mybot_ringbuf_destroy(rb);
 }
 
-static void test_clear_and_arguments(void) {
+static void test_arguments(void) {
     mybot_ringbuf_t rb = mybot_ringbuf_create(16);
     assert(rb != NULL);
-
-    assert(mybot_ringbuf_write(rb, "hello", 5) == 5);
-    assert(mybot_ringbuf_clear(rb) == 0);
-    expect_empty(rb, 16);
-    assert(mybot_ringbuf_clear(NULL) == -1);
 
     assert(mybot_ringbuf_write(NULL, "x", 1) == -1);
     assert(mybot_ringbuf_write(rb, NULL, 1) == -1);
@@ -209,7 +204,7 @@ int main(void) {
     test_full_and_empty();
     test_wrap_around();
     test_single_byte();
-    test_clear_and_arguments();
+    test_arguments();
     test_spsc_concurrency();
     return 0;
 }

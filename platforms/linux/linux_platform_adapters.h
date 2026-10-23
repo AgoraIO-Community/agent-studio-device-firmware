@@ -13,7 +13,7 @@ const mybot_key_ops_t *linux_key_platform_stdin_ops(void);
 const mybot_lcd_ops_t *linux_lcd_platform_console_ops(void);
 const mybot_announce_ops_t *linux_announce_platform_file_ops(void);
 const mybot_wifi_ops_t *linux_wifi_platform_host_network_ops(void);
-#if MYBOT_LINUX_HTTPS_OPENSSL
+#if MYBOT_ENABLE_HTTPS
 const mybot_https_ops_t *linux_https_platform_openssl_ops(void);
 #endif
 

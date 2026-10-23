@@ -50,7 +50,6 @@ static uint32_t s_last_bwe_max_bps;
 static uint32_t s_last_bwe_start_bps;
 static int s_rtm_login_result;
 static int s_rtm_logout_result;
-static int s_rtm_send_result;
 static int s_rtm_subscribe_result;
 static int s_rtm_unsubscribe_result;
 static bool s_auto_rtm_login_event;
@@ -71,7 +70,6 @@ static int s_send_calls;
 static int s_renew_calls;
 static int s_rtm_login_calls;
 static int s_rtm_logout_calls;
-static int s_rtm_send_calls;
 static int s_rtm_subscribe_calls;
 static int s_rtm_unsubscribe_calls;
 static int s_operation_seq;
@@ -83,17 +81,13 @@ static int s_token_expiry_calls;
 static int s_state_calls;
 static int s_rtm_event_calls;
 static int s_rtm_data_calls;
-static int s_rtm_send_result_calls;
 static int s_rtm_subscribe_result_calls;
 static int s_rtm_subscribe_data_calls;
 static mybot_rtc_state_t s_last_state;
 static mybot_rtm_event_type_t s_last_rtm_event;
 static int s_last_rtm_error;
-static mybot_rtm_message_state_t s_last_rtm_message_state;
 static char s_last_rtm_event_uid[AGORA_RTM_UID_MAX_LEN];
 static char s_last_rtm_data_uid[AGORA_RTM_UID_MAX_LEN];
-static char s_last_rtm_send_uid[AGORA_RTM_UID_MAX_LEN];
-static uint32_t s_last_rtm_result_msg_id;
 static size_t s_last_rtm_data_len;
 static char s_last_rtm_custom_type[64];
 static unsigned char s_last_rtm_data[AGORA_RTM_DATA_MAX_LEN];
@@ -107,11 +101,6 @@ static rtc_channel_options_t s_join_options;
 static char s_renewed_token[512];
 static char s_rtm_uid[AGORA_RTM_UID_MAX_LEN];
 static char s_rtm_token[512];
-static char s_rtm_peer_uid[AGORA_RTM_UID_MAX_LEN];
-static char s_rtm_custom_type[64];
-static uint32_t s_rtm_msg_id;
-static size_t s_rtm_msg_len;
-static rtm_message_type_e s_rtm_msg_type;
 static char s_rtm_channel[AGORA_RTC_CHANNEL_NAME_MAX_LEN + 1];
 static agora_rtm_handler_t s_rtm_handler;
 static size_t s_last_send_len;
@@ -365,20 +354,6 @@ int agora_rtm_logout(void) {
     return s_rtm_logout_result;
 }
 
-int agora_rtm_send_data(const char *rtm_uid, const void *msg, size_t msg_len, uint32_t msg_id,
-                        rtm_message_type_e msg_type, const char *custom_type) {
-    assert(rtm_uid != NULL);
-    assert(rtm_uid[0] != '\0');
-    assert(msg != NULL || msg_len == 0);
-    s_rtm_send_calls++;
-    snprintf(s_rtm_peer_uid, sizeof(s_rtm_peer_uid), "%s", rtm_uid);
-    s_rtm_msg_len = msg_len;
-    s_rtm_msg_id = msg_id;
-    s_rtm_msg_type = msg_type;
-    snprintf(s_rtm_custom_type, sizeof(s_rtm_custom_type), "%s", custom_type ? custom_type : "");
-    return s_rtm_send_result;
-}
-
 static void *rtm_subscribe_event_thread(void *arg) {
     (void)arg;
     aosl_hal_msleep(1);
@@ -479,16 +454,6 @@ static void on_rtm_data(const char *rtm_uid, const void *data, size_t len, const
     aosl_atomic_inc(&s_rtm_data_delivered);
 }
 
-static void on_rtm_send_data_result(const char *rtm_uid, uint32_t msg_id,
-                                    mybot_rtm_message_state_t state, void *user_data) {
-    assert(user_data == &s_callback_owner);
-    assert(rtm_uid != NULL);
-    s_rtm_send_result_calls++;
-    s_last_rtm_result_msg_id = msg_id;
-    s_last_rtm_message_state = state;
-    snprintf(s_last_rtm_send_uid, sizeof(s_last_rtm_send_uid), "%s", rtm_uid);
-}
-
 static void on_rtm_subscribe_result(const char *channel, int error_code, void *user_data) {
     assert(user_data == &s_callback_owner);
     assert(channel != NULL);
@@ -552,7 +517,7 @@ static void synchronize_rtc(void) {
     /* The synchronous MPQ query runs after already queued vendor events and
      * application callbacks, so their ordinary observation fields are safe
      * to read after it returns. Producers must finish posting before this. */
-    assert(mybot_agora_rtc_is_rtm_logged_in());
+    assert(mybot_agora_rtc_renew_token(NULL) < 0);
 }
 
 static void block_payload_owner(connection_id_t conn) {
@@ -730,16 +695,6 @@ static void test_rtm_callback_boundaries(const mybot_agora_rtc_callbacks_t *call
     oversized_custom[sizeof(oversized_custom) - 1] = '\0';
     memset(payload, 'p', sizeof(payload));
 
-    /* Both send and receive accept the complete documented limits. */
-    int sends_before = s_rtm_send_calls;
-    assert(mybot_agora_rtc_send_rtm_data(max_uid, payload, AGORA_RTM_DATA_MAX_LEN, UINT32_MAX,
-                                         max_custom) == 0);
-    assert(s_rtm_send_calls == sends_before + 1);
-    assert(s_rtm_msg_len == AGORA_RTM_DATA_MAX_LEN);
-    assert(s_rtm_msg_id == UINT32_MAX);
-    assert(strcmp(s_rtm_peer_uid, max_uid) == 0);
-    assert(strcmp(s_rtm_custom_type, max_custom) == 0);
-
     int data_before = s_rtm_data_calls;
     int channel_data_before = s_rtm_subscribe_data_calls;
     unsigned data_logs_before = s_rtm_data_log.calls;
@@ -773,7 +728,6 @@ static void test_rtm_callback_boundaries(const mybot_agora_rtc_callbacks_t *call
     /* Reject malformed borrowed fields without forwarding partial messages. */
     data_before = s_rtm_data_calls;
     channel_data_before = s_rtm_subscribe_data_calls;
-    int results_before = s_rtm_send_result_calls;
     int events_before = s_rtm_event_calls;
     s_rtm_handler.on_rtm_data(NULL, payload, 1, RTM_MESSAGE_TYPE_BINARY, NULL);
     s_rtm_handler.on_rtm_data(max_uid, NULL, 1, RTM_MESSAGE_TYPE_BINARY, NULL);
@@ -793,8 +747,6 @@ static void test_rtm_callback_boundaries(const mybot_agora_rtc_callbacks_t *call
                                         RTM_MESSAGE_TYPE_STRING, oversized_custom);
     s_rtm_handler.on_rtm_subscribe_data("boundary-room", max_uid, payload, 1,
                                         RTM_MESSAGE_TYPE_BINARY, NULL);
-    s_rtm_handler.on_rtm_send_data_result(NULL, 1, RTM_MSG_STATE_RECEIVED);
-    s_rtm_handler.on_rtm_send_data_result(oversized_uid, 1, RTM_MSG_STATE_RECEIVED);
     s_rtm_handler.on_rtm_event(NULL, RTM_EVENT_TYPE_LOGIN, ERR_RTM_OK);
     s_rtm_handler.on_rtm_event(NULL, RTM_EVENT_TYPE_EXIT, ERR_RTM_OK);
     s_rtm_handler.on_rtm_event(oversized_uid, RTM_EVENT_TYPE_EXIT, ERR_RTM_OK);
@@ -807,19 +759,8 @@ static void test_rtm_callback_boundaries(const mybot_agora_rtc_callbacks_t *call
     synchronize_rtc();
     assert(s_rtm_data_calls == data_before);
     assert(s_rtm_subscribe_data_calls == channel_data_before);
-    assert(s_rtm_send_result_calls == results_before);
     assert(s_rtm_event_calls == events_before);
 
-    static const rtm_msg_state_e states[] = {RTM_MSG_STATE_INIT, RTM_MSG_STATE_UNREACHABLE,
-                                             RTM_MSG_STATE_TIMEOUT};
-    for (size_t i = 0; i < sizeof(states) / sizeof(states[0]); ++i) {
-        s_rtm_handler.on_rtm_send_data_result(max_uid, (uint32_t)i, states[i]);
-        synchronize_rtc();
-        assert(s_rtm_send_result_calls == results_before + (int)i + 1);
-        assert(s_last_rtm_message_state == (mybot_rtm_message_state_t)states[i]);
-        assert(s_last_rtm_result_msg_id == (uint32_t)i);
-        assert(strcmp(s_last_rtm_send_uid, max_uid) == 0);
-    }
     s_rtm_handler.on_rtm_data(max_uid, payload, 1, RTM_MESSAGE_TYPE_BINARY, NULL);
     s_rtm_handler.on_rtm_subscribe_data("boundary-room", max_uid, payload, 1,
                                         RTM_MESSAGE_TYPE_STRING, NULL);
@@ -878,23 +819,19 @@ static void test_optional_callbacks(void) {
     int data_before = s_rtm_data_calls;
     int channel_data_before = s_rtm_subscribe_data_calls;
     int subscribe_results_before = s_rtm_subscribe_result_calls;
-    int send_results_before = s_rtm_send_result_calls;
     int token_expiries_before = s_token_expiry_calls;
     assert(mybot_agora_rtc_init("optional-app", NULL) == 0);
-    assert(mybot_agora_rtc_login_rtm("user", NULL) == 0);
+    assert(mybot_agora_rtc_join("optional-room", "", "user") == 0);
     join_rtm_login_thread();
-    synchronize_rtc();
     assert(s_rtm_token[0] == '\0');
+    join_rtm_subscribe_thread();
+    synchronize_rtc();
     static const char payload[] = "test";
     s_rtm_handler.on_rtm_data("peer", payload, sizeof(payload), RTM_MESSAGE_TYPE_STRING, NULL);
     s_rtm_handler.on_rtm_data("peer", payload, 0, RTM_MESSAGE_TYPE_STRING, NULL);
     /* Deliberately inject an unknown wire message type. */
     // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
     s_rtm_handler.on_rtm_data("peer", payload, sizeof(payload), (rtm_message_type_e)99, NULL);
-    s_rtm_handler.on_rtm_send_data_result("peer", 1, RTM_MSG_STATE_RECEIVED);
-    synchronize_rtc();
-    assert(mybot_agora_rtc_join("optional-room", "", "user") == 0);
-    join_rtm_subscribe_thread();
     synchronize_rtc();
     connection_id_t conn = s_last_conn;
     s_handler.on_join_channel_success(conn, 42, 0);
@@ -921,26 +858,13 @@ static void test_optional_callbacks(void) {
     synchronize_rtc();
     int logouts_before = s_rtm_logout_calls;
     assert(mybot_agora_rtc_leave() == 0);
-    /* Explicit login survives RTC leave and still accepts point-to-point sends. */
-    synchronize_rtc();
-    assert(s_rtm_logout_calls == logouts_before);
-    assert(mybot_agora_rtc_send_rtm_data("peer", payload, sizeof(payload), 1, NULL) == 0);
-
-    s_rtm_handler.on_rtm_event("user", RTM_EVENT_TYPE_EXIT, ERR_RTM_FAILED);
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
-    assert(mybot_agora_rtc_login_rtm("user", "") == 0);
-    join_rtm_login_thread();
-    synchronize_rtc();
-    assert(s_rtm_token[0] == '\0');
-    s_rtm_handler.on_rtm_event("user", RTM_EVENT_TYPE_EXIT, ERR_RTM_OK);
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
+    assert(s_rtm_logout_calls == logouts_before + 1);
     assert(s_state_calls == states_before);
     assert(s_remote_audio_calls == audio_before);
     assert(s_rtm_event_calls == events_before);
     assert(s_rtm_data_calls == data_before);
     assert(s_rtm_subscribe_data_calls == channel_data_before);
     assert(s_rtm_subscribe_result_calls == subscribe_results_before);
-    assert(s_rtm_send_result_calls == send_results_before);
     assert(s_token_expiry_calls == token_expiries_before);
     assert(mybot_agora_rtc_fini() == 0);
 }
@@ -1000,19 +924,14 @@ static void test_stale_connection_callbacks(const mybot_agora_rtc_callbacks_t *c
     s_rtm_handler.on_rtm_subscribe_result("stale-room", ERR_RTM_OK);
     s_rtm_handler.on_rtm_subscribe_data("stale-room", "peer", audio, 1, RTM_MESSAGE_TYPE_STRING,
                                         NULL);
-    s_rtm_handler.on_rtm_send_data_result("peer", 1, RTM_MSG_STATE_RECEIVED);
 #if MYBOT_ENABLE_VIDEO
     s_handler.on_target_bitrate_changed(active, 77777);
     s_handler.on_key_frame_gen_req(active, 7, VIDEO_STREAM_HIGH);
 #endif
     assert(s_state_calls == states_before);
     assert(s_remote_audio_calls == audio_before);
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
-    assert(mybot_agora_rtc_login_rtm("user", NULL) < 0);
-    assert(mybot_agora_rtc_logout_rtm() < 0);
     assert(mybot_agora_rtc_join("room", NULL, "user") < 0);
     assert(mybot_agora_rtc_send_audio(audio, sizeof(audio)) < 0);
-    assert(mybot_agora_rtc_send_rtm_data("peer", audio, 1, 1, NULL) < 0);
     assert(mybot_agora_rtc_renew_token("token") < 0);
     assert(mybot_agora_rtc_fini() == 0);
 }
@@ -1033,7 +952,6 @@ static void test_fini_cleanup_failures(const mybot_agora_rtc_callbacks_t *callba
         assert(s_destroy_calls == destroys_before + 1);
         assert(s_rtm_logout_calls == logouts_before + 1);
         assert(s_destroy_seq < s_fini_seq);
-        assert(!mybot_agora_rtc_is_rtm_logged_in());
         s_leave_result = 0;
         s_rtm_logout_result = 0;
         assert(mybot_agora_rtc_fini() == 0);
@@ -1057,7 +975,6 @@ static void test_notification_allocation_failures(const mybot_agora_rtc_callback
     synchronize_rtc();
     int states_before = s_state_calls;
     int events_before = s_rtm_event_calls;
-    int send_results_before = s_rtm_send_result_calls;
     int subscribe_results_before = s_rtm_subscribe_result_calls;
     int token_expiries_before = s_token_expiry_calls;
     user_info_t user = {.uid = 7};
@@ -1065,9 +982,9 @@ static void test_notification_allocation_failures(const mybot_agora_rtc_callback
 #if MYBOT_ENABLE_VIDEO
     int key_frames_before = s_video_key_frame_requests;
     uint32_t bitrate_before = s_video_target_bitrate;
-    const int notification_count = 14;
+    const int notification_count = 13;
 #else
-    const int notification_count = 12;
+    const int notification_count = 11;
 #endif
     for (int kind = 0; kind < notification_count; ++kind) {
         callback_allocation_fault_t fault = {.fail_at = 1};
@@ -1104,16 +1021,13 @@ static void test_notification_allocation_failures(const mybot_agora_rtc_callback
             s_rtm_handler.on_rtm_event("user", RTM_EVENT_TYPE_LOGIN, ERR_RTM_OK);
             break;
         case 10:
-            s_rtm_handler.on_rtm_send_data_result("peer", 1, RTM_MSG_STATE_RECEIVED);
-            break;
-        case 11:
             s_rtm_handler.on_rtm_subscribe_result("notification-room", ERR_RTM_OK);
             break;
 #if MYBOT_ENABLE_VIDEO
-        case 12:
+        case 11:
             s_handler.on_target_bitrate_changed(conn, 77777);
             break;
-        case 13:
+        case 12:
             s_handler.on_key_frame_gen_req(conn, 7, VIDEO_STREAM_HIGH);
             break;
 #endif
@@ -1126,7 +1040,6 @@ static void test_notification_allocation_failures(const mybot_agora_rtc_callback
         assert(s_state_calls == states_before);
         assert(s_last_state == MYBOT_RTC_STATE_CONNECTED);
         assert(s_rtm_event_calls == events_before);
-        assert(s_rtm_send_result_calls == send_results_before);
         assert(s_rtm_subscribe_result_calls == subscribe_results_before);
         assert(s_token_expiry_calls == token_expiries_before);
 #if MYBOT_ENABLE_VIDEO
@@ -1140,12 +1053,10 @@ static void test_notification_allocation_failures(const mybot_agora_rtc_callback
     assert(s_last_state == MYBOT_RTC_STATE_RECONNECTING);
     s_handler.on_rejoin_channel_success(conn, 42, 0);
     s_handler.on_token_privilege_will_expire(conn, NULL);
-    s_rtm_handler.on_rtm_send_data_result("peer", 1, RTM_MSG_STATE_RECEIVED);
     synchronize_rtc();
     assert(s_last_state == MYBOT_RTC_STATE_CONNECTED);
     assert(s_state_calls == states_before + 2);
     assert(s_token_expiry_calls == token_expiries_before + 1);
-    assert(s_rtm_send_result_calls == send_results_before + 1);
     assert(mybot_agora_rtc_leave() == 0);
     assert(mybot_agora_rtc_fini() == 0);
 }
@@ -1225,7 +1136,6 @@ int main(void) {
         .on_rtm_data = on_rtm_data,
         .on_rtm_subscribe_result = on_rtm_subscribe_result,
         .on_rtm_subscribe_data = on_rtm_subscribe_data,
-        .on_rtm_send_data_result = on_rtm_send_data_result,
 #if MYBOT_ENABLE_VIDEO
         .on_video_key_frame_requested = on_video_key_frame_requested,
         .on_video_target_bitrate_changed = on_video_target_bitrate_changed,
@@ -1267,124 +1177,7 @@ int main(void) {
     assert(s_init_calls == 1);
     assert(s_handler.on_rtc_stats == NULL);
 
-    /* Explicit RTM login is gated by SDK initialization and login event. */
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
-    assert(mybot_agora_rtc_login_rtm(NULL, "token") < 0);
-    assert(mybot_agora_rtc_login_rtm(oversized_rtm_uid, "token") < 0);
-    assert(s_rtm_login_calls == 0);
-    s_rtm_login_result = -1;
-    assert(mybot_agora_rtc_login_rtm("device-uid 01", "rejected-token") < 0);
-    assert(s_rtm_login_calls == 1);
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
-    s_rtm_login_result = 0;
-    assert(mybot_agora_rtc_login_rtm("device-uid 01", "rtm-token") == 0);
-    assert(s_rtm_login_calls == 2);
-    assert(strcmp(s_rtm_uid, "device-uid 01") == 0);
-    assert(strcmp(s_rtm_token, "rtm-token") == 0);
-    assert(mybot_agora_rtc_login_rtm("device-uid 01", "other-token") == 0);
-    assert(s_rtm_login_calls == 2);
-    assert(mybot_agora_rtc_login_rtm("other-device", "rtm-token") < 0);
-    assert(s_rtm_login_calls == 2);
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
-    assert(s_rtm_handler.on_rtm_event != NULL);
-    s_rtm_handler.on_rtm_event("other-device", RTM_EVENT_TYPE_LOGIN, ERR_RTM_OK);
-    assert(s_rtm_event_calls == 0);
-    s_rtm_handler.on_rtm_event("device-uid 01", RTM_EVENT_TYPE_LOGIN, ERR_RTM_OK);
-    assert(mybot_agora_rtc_is_rtm_logged_in());
-    assert(s_rtm_event_calls == 1);
-    assert(s_last_rtm_event == MYBOT_RTM_EVENT_LOGIN);
-    assert(s_last_rtm_error == ERR_RTM_OK);
-    assert(strcmp(s_last_rtm_event_uid, "device-uid 01") == 0);
-    int rtm_events_before_login_failure = s_rtm_event_calls;
-    s_rtm_handler.on_rtm_event("device-uid 01", RTM_EVENT_TYPE_LOGIN, ERR_RTM_LOGIN_REJECTED);
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
-    assert(s_rtm_event_calls == rtm_events_before_login_failure + 1);
-    assert(s_last_rtm_error == ERR_RTM_LOGIN_REJECTED);
-    s_rtm_handler.on_rtm_event("device-uid 01", RTM_EVENT_TYPE_LOGIN, ERR_RTM_OK);
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
-    assert(s_rtm_event_calls == rtm_events_before_login_failure + 1);
-    int rtm_logins_before_retry = s_rtm_login_calls;
-    assert(mybot_agora_rtc_login_rtm("device-uid 01", "rtm-token") == 0);
-    assert(s_rtm_login_calls == rtm_logins_before_retry + 1);
-    s_rtm_handler.on_rtm_event("device-uid 01", RTM_EVENT_TYPE_LOGIN, ERR_RTM_OK);
-    assert(mybot_agora_rtc_is_rtm_logged_in());
-    assert(s_rtm_event_calls == rtm_events_before_login_failure + 2);
-    /* The RTC join account must match an already requested RTM account. */
-    int rtm_logins_before_mismatched_join = s_rtm_login_calls;
-    assert(mybot_agora_rtc_join("room", "token", "other-device") < 0);
-    assert(s_rtm_login_calls == rtm_logins_before_mismatched_join);
-
     static const char rtm_payload[] = "{\"type\":\"hello\"}";
-    assert(mybot_agora_rtc_send_rtm_data(NULL, rtm_payload, sizeof(rtm_payload) - 1, 1, NULL) < 0);
-    assert(mybot_agora_rtc_send_rtm_data("bad/peer", rtm_payload, sizeof(rtm_payload) - 1, 1,
-                                         NULL) < 0);
-    assert(mybot_agora_rtc_send_rtm_data("agent-uid", NULL, sizeof(rtm_payload) - 1, 1, NULL) < 0);
-    assert(mybot_agora_rtc_send_rtm_data("agent-uid", rtm_payload, 0, 1, NULL) < 0);
-    char oversized_rtm_payload[AGORA_RTM_DATA_MAX_LEN + 1];
-    memset(oversized_rtm_payload, 'x', sizeof(oversized_rtm_payload));
-    assert(mybot_agora_rtc_send_rtm_data("agent-uid", oversized_rtm_payload,
-                                         sizeof(oversized_rtm_payload), 1, NULL) < 0);
-    char oversized_custom_type[34];
-    memset(oversized_custom_type, 'x', sizeof(oversized_custom_type) - 1);
-    oversized_custom_type[sizeof(oversized_custom_type) - 1] = '\0';
-    assert(mybot_agora_rtc_send_rtm_data("agent-uid", rtm_payload, sizeof(rtm_payload) - 1, 1,
-                                         oversized_custom_type) < 0);
-    assert(mybot_agora_rtc_send_rtm_data("agent-uid", rtm_payload, sizeof(rtm_payload) - 1, 7,
-                                         "json") == 0);
-    assert(s_rtm_send_calls == 1);
-    assert(strcmp(s_rtm_peer_uid, "agent-uid") == 0);
-    assert(s_rtm_msg_len == sizeof(rtm_payload) - 1);
-    assert(s_rtm_msg_id == 7);
-    assert(s_rtm_msg_type == RTM_MESSAGE_TYPE_BINARY);
-    assert(strcmp(s_rtm_custom_type, "json") == 0);
-    s_rtm_send_result = -1;
-    assert(mybot_agora_rtc_send_rtm_data("agent-uid", rtm_payload, sizeof(rtm_payload) - 1, 8,
-                                         NULL) < 0);
-    assert(s_rtm_send_calls == 2);
-    s_rtm_send_result = 0;
-    assert(s_rtm_handler.on_rtm_data != NULL);
-    s_rtm_handler.on_rtm_data("agent-uid", rtm_payload, sizeof(rtm_payload) - 1,
-                              RTM_MESSAGE_TYPE_STRING, "json");
-    synchronize_rtc();
-    assert(s_rtm_data_calls == 1);
-    assert(strcmp(s_last_rtm_data_uid, "agent-uid") == 0);
-    assert(s_last_rtm_data_len == sizeof(rtm_payload) - 1);
-    assert(strcmp(s_last_rtm_custom_type, "json") == 0);
-    assert(s_rtm_handler.on_rtm_send_data_result != NULL);
-    s_rtm_handler.on_rtm_send_data_result("agent-uid", 7, RTM_MSG_STATE_RECEIVED);
-    synchronize_rtc();
-    assert(s_rtm_send_result_calls == 1);
-    assert(strcmp(s_last_rtm_send_uid, "agent-uid") == 0);
-    assert(s_last_rtm_result_msg_id == 7);
-    assert(s_last_rtm_message_state == MYBOT_RTM_MSG_STATE_RECEIVED);
-    int rtm_events_before_kickoff = s_rtm_event_calls;
-    s_rtm_handler.on_rtm_event("device-uid 01", RTM_EVENT_TYPE_KICKOFF, ERR_RTM_LOGIN_REJECTED);
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
-    assert(s_rtm_event_calls == rtm_events_before_kickoff + 1);
-    assert(mybot_agora_rtc_send_rtm_data("agent-uid", rtm_payload, sizeof(rtm_payload) - 1, 8,
-                                         NULL) < 0);
-    int logout_calls_after_kickoff = s_rtm_logout_calls;
-    assert(mybot_agora_rtc_logout_rtm() == 0);
-    assert(s_rtm_logout_calls == logout_calls_after_kickoff);
-
-    assert(mybot_agora_rtc_login_rtm("device-uid 01", "rtm-token") == 0);
-    s_rtm_handler.on_rtm_event("device-uid 01", RTM_EVENT_TYPE_LOGIN, ERR_RTM_OK);
-    s_rtm_logout_result = -1;
-    assert(mybot_agora_rtc_logout_rtm() < 0);
-    assert(s_rtm_logout_calls == logout_calls_after_kickoff + 1);
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
-    s_rtm_logout_result = 0;
-    assert(mybot_agora_rtc_logout_rtm() == 0);
-    /* Failed logout clears local state, so a retry does not call the vendor. */
-    assert(s_rtm_logout_calls == logout_calls_after_kickoff + 1);
-    int rtm_events_after_logout = s_rtm_event_calls;
-    s_rtm_handler.on_rtm_event("device-uid 01", RTM_EVENT_TYPE_LOGIN, ERR_RTM_OK);
-    s_rtm_handler.on_rtm_data("agent-uid", rtm_payload, sizeof(rtm_payload) - 1,
-                              RTM_MESSAGE_TYPE_STRING, "json");
-    s_rtm_handler.on_rtm_send_data_result("agent-uid", 7, RTM_MSG_STATE_RECEIVED);
-    assert(s_rtm_event_calls == rtm_events_after_logout);
-    assert(s_rtm_data_calls == 1);
-    assert(s_rtm_send_result_calls == 1);
 
     assert(mybot_agora_rtc_init("app-1", NULL) == 0);
     assert(mybot_agora_rtc_init("app-1", &callbacks) == 0);
@@ -1666,7 +1459,6 @@ int main(void) {
     s_handler.on_audio_data(first_conn, 7, 0, pcm_data, sizeof(pcm_data), &pcm_info);
     s_rtm_handler.on_rtm_subscribe_data("room", "agent-uid", rtm_payload, sizeof(rtm_payload) - 1,
                                         RTM_MESSAGE_TYPE_STRING, "json");
-    assert(!mybot_agora_rtc_is_rtm_logged_in());
     assert(s_state_calls == state_after_leave);
     assert(s_remote_audio_calls == audio_after_leave);
     assert(s_rtm_subscribe_data_calls == channel_data_after_leave);

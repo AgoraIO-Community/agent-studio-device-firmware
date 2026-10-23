@@ -43,14 +43,10 @@ printf 'tagged SDK\n' >"$repo/src/sdk.c"
 printf 'SDK license\n' >"$repo/LICENSE"
 printf 'Third-party notices\n' >"$repo/THIRD_PARTY_NOTICES.md"
 rtsa="$repo/third_party/agora_rtsa_sdk"
-mkdir -p "$rtsa/agora_sdk/include" "$rtsa/agora_sdk/lib/x86_64" "$rtsa/agora_sdk/bin" "$rtsa/example/out" \
-    "$rtsa/example/third-party/file_parser/lib"
+mkdir -p "$rtsa/agora_sdk/include" "$rtsa/agora_sdk/lib/x86_64"
 printf 'RTSA header\n' >"$rtsa/agora_sdk/include/agora_rtc_api.h"
 printf 'CONFIG_MINIMAL_TIMER_INTERVAL_MS=60\n' >"$rtsa/agora_sdk/.config"
-for binary in agora_sdk/lib/x86_64/libagora-rtc-sdk.so agora_sdk/bin/demo example/out/demo \
-    example/third-party/file_parser/lib/libparser.a; do
-    printf 'excluded RTSA binary\n' >"$rtsa/$binary"
-done
+printf 'excluded RTSA binary\n' >"$rtsa/agora_sdk/lib/x86_64/libagora-rtc-sdk.so"
 git -C "$repo" -c protocol.file.allow=always submodule add -q "$test_root/aosl-source" third_party/aosl
 git -C "$repo" add .
 git -C "$repo" commit -qm "Release fixture"
@@ -85,7 +81,7 @@ cmp "$out/$sums" "$again/$sums"
     'CONFIG_MINIMAL_TIMER_INTERVAL_MS=60' ]]
 tar -tf "$out/$archive" >"$test_root/members"
 grep -qx 'mybot-1.2.3/third_party/agora_rtsa_sdk/agora_sdk/include/agora_rtc_api.h' "$test_root/members"
-if grep -Eq '/(\.git(/|$)|untracked\.txt$)|agora_rtsa_sdk/(agora_sdk/(lib/|bin/)|example/out/|example/third-party/file_parser/lib/)' \
+if grep -Eq '/(\.git(/|$)|untracked\.txt$)|agora_rtsa_sdk/agora_sdk/lib/' \
     "$test_root/members"; then
     printf 'Package contains working-tree data, Git internals, or RTSA binaries\n' >&2
     exit 1

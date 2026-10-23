@@ -189,9 +189,11 @@ add_library(mybot_sdk STATIC
     src/platform/mybot_wifi.c
     src/rtc/mybot_agora_rtc.c
     src/service/mybot_device_client.c
+    src/support/mybot_http_header.c
     src/support/mybot_http_client.c
     src/support/mybot_json.c
     src/support/mybot_ringbuf.c
+    src/support/mybot_url.c
 )
 add_library(mybot::sdk ALIAS mybot_sdk)
 set_target_properties(mybot_sdk PROPERTIES EXPORT_NAME sdk)
@@ -297,17 +299,6 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/mybot_rtsa_ptime.cmake
     DESTINATION ${MYBOT_INSTALL_CMAKEDIR}
 )
-
-set(MYBOT_PC_PREFIX_REL "")
-string(REPLACE "/" ";" _mybot_pc_segments "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
-list(LENGTH _mybot_pc_segments _mybot_pc_depth)
-foreach(_i RANGE 1 ${_mybot_pc_depth})
-    string(APPEND MYBOT_PC_PREFIX_REL "../")
-endforeach()
-
-configure_file(cmake/mybot.pc.in ${CMAKE_CURRENT_BINARY_DIR}/mybot.pc @ONLY)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mybot.pc
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
 configure_file(docs/Doxyfile.in ${CMAKE_CURRENT_BINARY_DIR}/docs/Doxyfile @ONLY)
 

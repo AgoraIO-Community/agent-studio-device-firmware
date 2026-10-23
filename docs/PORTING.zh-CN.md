@@ -137,6 +137,7 @@ SDK 的 HTTP 接收缓冲最多申请 32 KiB，并为结尾 NUL 保留一个字�
 
 Linux 参考实现使用 OpenSSL 与系统 CA 库。明文 HTTP 仅存在于
 配置了 `MYBOT_ENABLE_HTTPS=OFF -DMYBOT_ALLOW_INSECURE_HTTP=ON` 的隔离开发构建。
+Linux 参考平台仅在 `MYBOT_ENABLE_HTTPS=ON` 时编译并链接 OpenSSL。
 
 ### 按键
 
@@ -158,21 +159,14 @@ Linux 参考实现使用 OpenSSL 与系统 CA 库。明文 HTTP 仅存在于
 存在显示设备时实现 `mybot_lcd_ops_t`。渲染由应用 control owner 调用，SDK 不会并发调用。
 内容为借用。将 ops 表加入平台描述符。
 
-`mybot_lcd_content_t.indicators` 是用于叠加提示和一次性表情请求的位图。在
+`mybot_lcd_content_t.indicators` 是用于会话界面叠加提示的位图。在
 `MYBOT_LCD_SCREEN_IN_CONVERSATION` 中，`MYBOT_LCD_INDICATOR_VP_REGISTERED` 表示当前会话的声纹
 已由服务器注册成功，平台应将其渲染为会话界面的附加指示器。平台应忽略无法识别的位，不能
 根据该指示器自行推断生命周期状态。该位清零时，平台可以自行显示“注册中/未注册”标记，
 但这只是显示状态，不能改变 SDK 生命周期。`MYBOT_LCD_INDICATOR_LISTENING`、
 `MYBOT_LCD_INDICATOR_THINKING` 和 `MYBOT_LCD_INDICATOR_SPEAKING` 分别表示服务端正在监听、
 思考或播报，后三个位互斥。
-
-LCD 契约另定义了 `MYBOT_LCD_INDICATOR_HAPPY`、`MYBOT_LCD_INDICATOR_SAD`、
-`MYBOT_LCD_INDICATOR_ANGRY` 与 `MYBOT_LCD_INDICATOR_SURPRISED` 一次性表情位，MCP 设备命令
-不再发出这些位。每次含有表情位的 render 调用都启动一个新表情，即使与上次相同。普通刷新
-没有表情位，只更新叠加提示，不重启或取消正在显示的表情。SDK 不持久保存表情命令，也不发送清零刷新。
-平台负责表情预设和动画时序；新表情覆盖未完成的旧表情，离开
-`MYBOT_LCD_SCREEN_IN_CONVERSATION` 时结束表情。异步渲染需在回调返回前复制内容，
-`destroy()` 释放上下文前必须等待相关工作退出。接口契约见
+异步渲染需在回调返回前复制内容，`destroy()` 释放上下文前必须等待相关工作退出。接口契约见
 [mybot_lcd.h](../include/mybot/platform/mybot_lcd.h)。
 
 ### 唤醒词（可选）
@@ -277,7 +271,8 @@ target_link_libraries(device_firmware PRIVATE mybot::sdk my_mcu_platform)
 `MYBOT_BUILD_LINUX_PLATFORM=OFF`。宿主可预定义名为 `agora-rtc-sdk` 的导入目标。本版本支持
 `add_subdirectory()` 源码集成，也支持通过 `find_package(mybot)` 消费已安装包。源码集成需先
 初始化 mybot 的嵌套 AOSL submodule（在 mybot 检出目录执行
-`git submodule update --init --recursive`）。
+`git submodule update --init --recursive`）。安装包只提供 CMake package 文件，不安装
+pkg-config 元数据。
 
 ## 第 6 步：启动与停止
 
@@ -392,13 +387,13 @@ SDK 现有缓冲区仍为 `device_id[64]`；启动校验检查非空和 NUL 结�
 设备服务的启动会话响应提供服务端生成的 `rtc.uid`（也称 `local_uid`），并在顶层提供点对点
 消息使用的 `agent_uid`。SDK 原样使用 `rtc.uid` 作为 RTC user account 和本地 RTM UID。启用
 RTM token 鉴权时应使用独立的 RTM 凭据；当前服务响应只提供 `rtc.token`，部署方必须确认
-服务端/项目鉴权模式允许该 token 用于 RTM，或扩展服务协议下发 RTM token。`agent_uid` 是传给
-`mybot_agora_rtc_send_rtm_data()` 的对端 UID；设备 ID 仅用于设备服务身份，不能替代这两个账号。
+服务端/项目鉴权模式允许该 token 用于 RTM，或扩展服务协议下发 RTM token。`agent_uid` 标识
+允许下发命令和指示的 agent；设备 ID 仅用于设备服务身份，不能替代这两个账号。
 
 RTM UID 必须非空、长度小于 64 字节，并且只能包含 Agora 接受的 ASCII 字母、数字、空格和
 标点字符。`mybot_agora_rtc_rtm_uid_is_valid()` 暴露了登录前使用的同一校验规则。RTM 登录是
-异步的：只有 `MYBOT_RTM_EVENT_LOGIN` 回调的错误码为 0 后才允许发送消息。RTM 负载上限为
-31 KiB，custom type 上限为 32 字节。
+异步的：只有 `MYBOT_RTM_EVENT_LOGIN` 回调的错误码为 0 后，入站消息才会被转发。SDK 不提供
+主动发送 RTM 消息的接口。入站负载上限为 31 KiB，custom type 上限为 32 字节。
 设备服务客户端会拒绝超出目标缓冲区的响应字符串；RTC token 缓冲区为 512 字节内容预留了
 额外的结尾 NUL 字节。
 

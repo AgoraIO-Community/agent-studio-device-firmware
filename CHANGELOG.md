@@ -9,6 +9,20 @@ This project follows Semantic Versioning.
 - Refresh the Chinese and English pairing-code prompt and digit audio.
 - Remove stale external-platform, footprint, endpoint, and licensing details from the guides, and
   document only the device-service fields consumed by this repository.
+- Use one bounded URL parser for startup configuration and HTTP requests, and one strict printable
+  header-value validator for request headers and device authorization credentials.
+
+### Removed
+
+- Remove the unused outbound RTM publish path, including its message-state API, send-result event,
+  and test-only login/logout wrappers. RTM remains internal to the conversation join lifecycle.
+- Remove test-only ring-buffer clear and LCD screen helpers, plus unreachable media mute and LCD
+  emotion paths that had no production command or key trigger.
+- Remove an unused HTTP URL limit, an unreachable RTC state, the redundant Linux OpenSSL build
+  switch, and the incomplete pkg-config installation. The CMake package remains the supported
+  installed integration.
+- Remove vendored Agora RTSA examples, skills, demo/test media, helper binaries, and duplicate build
+  metadata. Keep only the Linux public header, `.config`, shared library, and package provenance.
 
 ## [1.3.0] - 2026-10-19
 
