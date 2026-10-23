@@ -180,7 +180,7 @@ Implement `mybot_lcd_ops_t` when a display exists. Render receives semantic cont
 application control owner; the SDK does not invoke it concurrently. Content is borrowed. Add the
 operations table to the platform descriptor.
 
-`mybot_lcd_content_t.indicators` is a bitmask for overlays and one-shot expressions. During
+`mybot_lcd_content_t.indicators` is a bitmask for conversation overlays. During
 `MYBOT_LCD_SCREEN_IN_CONVERSATION`, `MYBOT_LCD_INDICATOR_VP_REGISTERED` means the server completed
 voice-print registration for the active conversation. Render this as an in-conversation indicator;
 ignore bits the platform does not recognize and do not derive lifecycle state from the indicator.
@@ -189,16 +189,8 @@ only presentation state and must not change the SDK lifecycle. The
 `MYBOT_LCD_INDICATOR_LISTENING`, `MYBOT_LCD_INDICATOR_THINKING`, and
 `MYBOT_LCD_INDICATOR_SPEAKING` bits expose the server's current conversation phase; these three bits
 are mutually exclusive.
-
-The LCD contract also defines `MYBOT_LCD_INDICATOR_HAPPY`, `MYBOT_LCD_INDICATOR_SAD`,
-`MYBOT_LCD_INDICATOR_ANGRY`, and `MYBOT_LCD_INDICATOR_SURPRISED` as one-shot emotion bits.
-MCP device commands do not emit these bits. A render call containing an emotion bit starts
-a new expression, even when the bit matches the previous request. Ordinary renders have no
-emotion bit: update overlays without restarting or cancelling the current expression. The SDK
-does not retain expression commands or issue a clearing render. The platform owns expression
-presets and animation timing; a new expression replaces the unfinished one, and leaving
-`MYBOT_LCD_SCREEN_IN_CONVERSATION` ends it. Copy content needed by asynchronous rendering before
-returning, and wait for that work before `destroy()` releases the context. See
+Copy content needed by asynchronous rendering before returning, and wait for that work before
+`destroy()` releases the context. See
 [mybot_lcd.h](../include/mybot/platform/mybot_lcd.h) for the interface contract.
 
 ### Wake words (optional)

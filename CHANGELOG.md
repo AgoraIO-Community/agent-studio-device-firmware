@@ -14,6 +14,8 @@ This project follows Semantic Versioning.
 
 - Remove the unused outbound RTM publish path, including its message-state API, send-result event,
   and test-only login/logout wrappers. RTM remains internal to the conversation join lifecycle.
+- Remove test-only ring-buffer clear and LCD screen helpers, plus unreachable media mute and LCD
+  emotion paths that had no production command or key trigger.
 
 ## [1.3.0] - 2026-10-19
 

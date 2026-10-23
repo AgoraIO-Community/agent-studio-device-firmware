@@ -158,21 +158,14 @@ Linux 参考实现使用 OpenSSL 与系统 CA 库。明文 HTTP 仅存在于
 存在显示设备时实现 `mybot_lcd_ops_t`。渲染由应用 control owner 调用，SDK 不会并发调用。
 内容为借用。将 ops 表加入平台描述符。
 
-`mybot_lcd_content_t.indicators` 是用于叠加提示和一次性表情请求的位图。在
+`mybot_lcd_content_t.indicators` 是用于会话界面叠加提示的位图。在
 `MYBOT_LCD_SCREEN_IN_CONVERSATION` 中，`MYBOT_LCD_INDICATOR_VP_REGISTERED` 表示当前会话的声纹
 已由服务器注册成功，平台应将其渲染为会话界面的附加指示器。平台应忽略无法识别的位，不能
 根据该指示器自行推断生命周期状态。该位清零时，平台可以自行显示“注册中/未注册”标记，
 但这只是显示状态，不能改变 SDK 生命周期。`MYBOT_LCD_INDICATOR_LISTENING`、
 `MYBOT_LCD_INDICATOR_THINKING` 和 `MYBOT_LCD_INDICATOR_SPEAKING` 分别表示服务端正在监听、
 思考或播报，后三个位互斥。
-
-LCD 契约另定义了 `MYBOT_LCD_INDICATOR_HAPPY`、`MYBOT_LCD_INDICATOR_SAD`、
-`MYBOT_LCD_INDICATOR_ANGRY` 与 `MYBOT_LCD_INDICATOR_SURPRISED` 一次性表情位，MCP 设备命令
-不再发出这些位。每次含有表情位的 render 调用都启动一个新表情，即使与上次相同。普通刷新
-没有表情位，只更新叠加提示，不重启或取消正在显示的表情。SDK 不持久保存表情命令，也不发送清零刷新。
-平台负责表情预设和动画时序；新表情覆盖未完成的旧表情，离开
-`MYBOT_LCD_SCREEN_IN_CONVERSATION` 时结束表情。异步渲染需在回调返回前复制内容，
-`destroy()` 释放上下文前必须等待相关工作退出。接口契约见
+异步渲染需在回调返回前复制内容，`destroy()` 释放上下文前必须等待相关工作退出。接口契约见
 [mybot_lcd.h](../include/mybot/platform/mybot_lcd.h)。
 
 ### 唤醒词（可选）
