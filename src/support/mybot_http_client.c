@@ -26,7 +26,6 @@
 #define HTTP_TIMEOUT_MS 5000 /* shared deadline for connect/send/receive stages */
 #define RECV_BUF_SIZE 4096
 #define RECV_BUF_MAX (32 * 1024) /* hard cap on response buffer */
-#define MAX_URL_LEN 512
 #define HTTP_REQUEST_BUFFER_SIZE 2048
 
 static bool ascii_case_equal_n(const char *left, const char *right, size_t len) {

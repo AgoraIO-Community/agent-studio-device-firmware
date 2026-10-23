@@ -156,6 +156,7 @@ to detect closure or overflow; receive calls never use zero capacity.
 The Linux reference implementation uses OpenSSL and the system CA store. Plain HTTP exists only for an
 isolated development build configured with
 `MYBOT_ENABLE_HTTPS=OFF -DMYBOT_ALLOW_INSECURE_HTTP=ON`.
+OpenSSL support is compiled into the Linux reference platform exactly when `MYBOT_ENABLE_HTTPS=ON`.
 
 ### Keys
 
@@ -310,6 +311,7 @@ port keeps `MYBOT_BUILD_LINUX_PLATFORM=OFF`. A host may predefine an imported ta
 `agora-rtc-sdk`. Both source integration with `add_subdirectory()` and installed-package
 consumption via `find_package(mybot)` are supported. Source integration must initialize mybot's
 nested AOSL submodule (`git submodule update --init --recursive` in the mybot checkout).
+The installed package provides CMake package files only; pkg-config metadata is not installed.
 
 ## Step 6: Start and stop
 

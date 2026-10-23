@@ -16,6 +16,9 @@ This project follows Semantic Versioning.
   and test-only login/logout wrappers. RTM remains internal to the conversation join lifecycle.
 - Remove test-only ring-buffer clear and LCD screen helpers, plus unreachable media mute and LCD
   emotion paths that had no production command or key trigger.
+- Remove an unused HTTP URL limit, an unreachable RTC state, the redundant Linux OpenSSL build
+  switch, and the incomplete pkg-config installation. The CMake package remains the supported
+  installed integration.
 
 ## [1.3.0] - 2026-10-19
 

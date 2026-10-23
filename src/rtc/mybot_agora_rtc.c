@@ -345,8 +345,6 @@ static const char *state_name(mybot_rtc_state_t state) {
         return "DISCONNECTED";
     case MYBOT_RTC_STATE_ERROR:
         return "ERROR";
-    case MYBOT_RTC_STATE_INIT_FAILED:
-        return "INIT_FAILED";
     }
     return "?";
 }

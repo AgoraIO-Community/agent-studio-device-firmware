@@ -21,7 +21,6 @@ typedef enum {
     MYBOT_RTC_STATE_RECONNECTING,
     MYBOT_RTC_STATE_DISCONNECTED,
     MYBOT_RTC_STATE_ERROR,
-    MYBOT_RTC_STATE_INIT_FAILED,
 } mybot_rtc_state_t;
 
 /** RTM lifecycle events forwarded from the Agora SDK. */
