@@ -9,6 +9,8 @@ This project follows Semantic Versioning.
 - Refresh the Chinese and English pairing-code prompt and digit audio.
 - Remove stale external-platform, footprint, endpoint, and licensing details from the guides, and
   document only the device-service fields consumed by this repository.
+- Use one bounded URL parser for startup configuration and HTTP requests, and one strict printable
+  header-value validator for request headers and device authorization credentials.
 
 ### Removed
 
