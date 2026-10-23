@@ -31,14 +31,6 @@ typedef enum {
     MYBOT_RTM_EVENT_EXIT = 2,
 } mybot_rtm_event_type_t;
 
-/** RTM delivery state forwarded by the Agora SDK. */
-typedef enum {
-    MYBOT_RTM_MSG_STATE_INIT = 0,
-    MYBOT_RTM_MSG_STATE_RECEIVED,
-    MYBOT_RTM_MSG_STATE_UNREACHABLE,
-    MYBOT_RTM_MSG_STATE_TIMEOUT,
-} mybot_rtm_message_state_t;
-
 /** Maximum byte capacity of an RTM account including its terminating NUL. */
 #define MYBOT_RTM_UID_MAX_LEN 64
 
@@ -59,8 +51,6 @@ typedef struct {
     void (*on_rtm_subscribe_result)(const char *channel, int error_code, void *user_data);
     void (*on_rtm_subscribe_data)(const char *channel, const char *rtm_uid, const void *data,
                                   size_t len, const char *custom_type, void *user_data);
-    void (*on_rtm_send_data_result)(const char *rtm_uid, uint32_t msg_id,
-                                    mybot_rtm_message_state_t state, void *user_data);
 #if MYBOT_ENABLE_VIDEO
     void (*on_video_key_frame_requested)(void *user_data);
     void (*on_video_target_bitrate_changed)(uint32_t target_bps, void *user_data);
@@ -84,19 +74,6 @@ int mybot_agora_rtc_init(const char *app_id, const mybot_agora_rtc_callbacks_t *
  * device id unless the service explicitly assigns that value.
  */
 bool mybot_agora_rtc_rtm_uid_is_valid(const char *rtm_uid);
-
-/** Log in to RTM using the server-issued local RTC UID and RTM token. */
-int mybot_agora_rtc_login_rtm(const char *rtm_uid, const char *rtm_token);
-
-/** Log out of an explicitly requested RTM session. Join-owned sessions are logged out by leave. */
-int mybot_agora_rtc_logout_rtm(void);
-
-/** Send one point-to-point RTM message after the login event succeeds. */
-int mybot_agora_rtc_send_rtm_data(const char *peer_rtm_uid, const void *data, size_t len,
-                                  uint32_t msg_id, const char *custom_type);
-
-/** Return whether the RTM login event has completed successfully. */
-bool mybot_agora_rtc_is_rtm_logged_in(void);
 
 /** Create a connection and start joining one 1-to-1 channel. RTM login is
  * requested first using user_account as the local RTM UID and token as the RTM

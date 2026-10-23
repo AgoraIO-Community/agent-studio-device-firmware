@@ -450,15 +450,16 @@ The device-service conversation response supplies a server-generated `rtc.uid` (
 unchanged as both the RTC user account and the local RTM UID. RTM token authentication uses a
 separate RTM credential; the current service response exposes `rtc.token`, so deployments must
 confirm that the service/app authentication mode accepts it for RTM or provide an RTM token through
-an extended service contract. The `agent_uid` value is the peer passed to
-`mybot_agora_rtc_send_rtm_data()`; the device ID is only the device-service identity and must not be
+an extended service contract. The `agent_uid` value identifies the agent allowed to deliver
+commands and indicators; the device ID is only the device-service identity and must not be
 substituted for either account.
 
 An RTM UID must be non-empty, shorter than 64 bytes, and contain only ASCII letters, digits, space,
 or the punctuation characters accepted by Agora. `mybot_agora_rtc_rtm_uid_is_valid()` exposes the
-same validation used before login. RTM login is asynchronous: a send is allowed only after the
-`MYBOT_RTM_EVENT_LOGIN` callback reports error code 0. RTM payloads are limited to 31 KiB and
-custom types to 32 bytes.
+same validation used before login. RTM login is asynchronous: inbound data is eligible for
+forwarding only after the `MYBOT_RTM_EVENT_LOGIN` callback reports error code 0. The SDK does not
+provide an outbound RTM publish API. Inbound payloads are limited to 31 KiB and custom types to
+32 bytes.
 The device-service client rejects response strings that exceed their destination buffers; RTC token
 storage reserves space for 512 bytes of content plus the terminating NUL.
 
