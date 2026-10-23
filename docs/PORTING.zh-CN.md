@@ -137,6 +137,7 @@ SDK 的 HTTP 接收缓冲最多申请 32 KiB，并为结尾 NUL 保留一个字�
 
 Linux 参考实现使用 OpenSSL 与系统 CA 库。明文 HTTP 仅存在于
 配置了 `MYBOT_ENABLE_HTTPS=OFF -DMYBOT_ALLOW_INSECURE_HTTP=ON` 的隔离开发构建。
+Linux 参考平台仅在 `MYBOT_ENABLE_HTTPS=ON` 时编译并链接 OpenSSL。
 
 ### 按键
 
@@ -270,7 +271,8 @@ target_link_libraries(device_firmware PRIVATE mybot::sdk my_mcu_platform)
 `MYBOT_BUILD_LINUX_PLATFORM=OFF`。宿主可预定义名为 `agora-rtc-sdk` 的导入目标。本版本支持
 `add_subdirectory()` 源码集成，也支持通过 `find_package(mybot)` 消费已安装包。源码集成需先
 初始化 mybot 的嵌套 AOSL submodule（在 mybot 检出目录执行
-`git submodule update --init --recursive`）。
+`git submodule update --init --recursive`）。安装包只提供 CMake package 文件，不安装
+pkg-config 元数据。
 
 ## 第 6 步：启动与停止
 

@@ -298,17 +298,6 @@ install(FILES
     DESTINATION ${MYBOT_INSTALL_CMAKEDIR}
 )
 
-set(MYBOT_PC_PREFIX_REL "")
-string(REPLACE "/" ";" _mybot_pc_segments "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
-list(LENGTH _mybot_pc_segments _mybot_pc_depth)
-foreach(_i RANGE 1 ${_mybot_pc_depth})
-    string(APPEND MYBOT_PC_PREFIX_REL "../")
-endforeach()
-
-configure_file(cmake/mybot.pc.in ${CMAKE_CURRENT_BINARY_DIR}/mybot.pc @ONLY)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mybot.pc
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
-
 configure_file(docs/Doxyfile.in ${CMAKE_CURRENT_BINARY_DIR}/docs/Doxyfile @ONLY)
 
 # Keep the project license and third-party terms with every installed development package.

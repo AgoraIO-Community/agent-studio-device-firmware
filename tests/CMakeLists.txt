@@ -243,6 +243,4 @@ if(MYBOT_BUILD_LINUX_PLATFORM)
     )
     target_include_directories(mybot_linux_platform_descriptor_test PRIVATE ../platforms/linux)
     target_link_libraries(mybot_linux_platform_descriptor_test PRIVATE mybot::platform_linux)
-    target_compile_definitions(mybot_linux_platform_descriptor_test PRIVATE
-        MYBOT_LINUX_HTTPS_OPENSSL=$<BOOL:${MYBOT_LINUX_HTTPS_OPENSSL}>)
 endif()

@@ -154,6 +154,7 @@ static void test_url_and_header_validation(void) {
     assert(parse_url(NULL, &parts) < 0);
     assert(parse_url("https://service.example", NULL) < 0);
     assert(parse_url("ftp://service.example/path", &parts) < 0);
+#if MYBOT_ENABLE_HTTPS
     assert(parse_url("https:///path", &parts) < 0);
     assert(parse_url("https://service.example", &parts) == 0);
     assert(strcmp(parts.path, "/") == 0);
@@ -175,6 +176,29 @@ static void test_url_and_header_validation(void) {
     memset(long_url + 10, 'p', 512);
     long_url[522] = '\0';
     assert(parse_url(long_url, &parts) < 0);
+#else
+    assert(parse_url("http:///path", &parts) < 0);
+    assert(parse_url("http://service.example", &parts) == 0);
+    assert(strcmp(parts.path, "/") == 0);
+    assert(parse_url("http://service.example:65535/a?b=c", &parts) == 0);
+    assert(parts.port == 65535);
+    assert(parse_url("http://service.example:/path", &parts) < 0);
+    assert(parse_url("http://service.example:65536/path", &parts) < 0);
+    assert(parse_url("http://service.example:-1/path", &parts) < 0);
+    assert(parse_url("http://service.example\\evil/path", &parts) < 0);
+    assert(parse_url("http://service.example/path with space", &parts) < 0);
+    assert(parse_url("http://service.example/path\\name", &parts) < 0);
+
+    memcpy(long_url, "http://", 7);
+    memset(long_url + 7, 'h', 128);
+    long_url[135] = '\0';
+    assert(parse_url(long_url, &parts) < 0);
+
+    memcpy(long_url, "http://h/", 9);
+    memset(long_url + 9, 'p', 512);
+    long_url[521] = '\0';
+    assert(parse_url(long_url, &parts) < 0);
+#endif
 
     assert(!host_is_safe(NULL));
     assert(!host_is_safe(""));
@@ -700,12 +724,21 @@ int main(void) {
     assert(s_tls_closed == 0);
 
     url_parts_t parts;
+#if MYBOT_ENABLE_HTTPS
     assert(parse_url("https://service.example/v1", &parts) == 0);
     assert(parts.use_tls);
     assert(parts.port == 443);
     assert(strcmp(parts.host, "service.example") == 0);
     assert(strcmp(parts.path, "/v1") == 0);
     assert(parse_url("http://service.example/v1", &parts) < 0);
+#else
+    assert(parse_url("http://service.example/v1", &parts) == 0);
+    assert(!parts.use_tls);
+    assert(parts.port == 80);
+    assert(strcmp(parts.host, "service.example") == 0);
+    assert(strcmp(parts.path, "/v1") == 0);
+    assert(parse_url("https://service.example/v1", &parts) < 0);
+#endif
     assert(parse_url("https://service.example:0/v1", &parts) < 0);
     assert(parse_url("https://service.example:443x/v1", &parts) < 0);
     test_url_and_header_validation();
@@ -765,6 +798,7 @@ int main(void) {
                    "5\r\nhell",
                    1);
 
+#if MYBOT_ENABLE_HTTPS
     mybot_platform_descriptor_t descriptor = mybot_test_platform_descriptor();
     descriptor.https = &s_fake_tls_ops;
     assert(mybot_platform_register(&descriptor) == 0);
@@ -794,16 +828,21 @@ int main(void) {
     assert(s_tls_closed == 1);
     assert(s_tls_connect_count == connect_count + 1);
     mybot_http_client_response_free(&response);
+#endif
 
     test_response_boundaries();
     test_status_and_chunk_framing();
     test_content_length_consistency();
+#if MYBOT_ENABLE_HTTPS
     test_tls_transport_and_requests();
     test_receive_capacity_boundaries();
     test_receive_capacity_failures();
     test_parse_fuzz();
     test_oom_injection();
     test_tls_wrapper_failures();
+#else
+    test_parse_fuzz();
+#endif
 
     aosl_dtor();
     puts("http_client_test: ok");
