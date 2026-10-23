@@ -24,6 +24,10 @@ Location: `third_party/agora_rtsa_sdk`. The bundled shared-library package ident
 Linux **development and demo** use only and is intentionally retained in this repository for the
 Linux reference demo (it is not removed).
 
+The vendored package retains only `PACKAGE_INFO`, the public API header, `.config`, and the
+shared library. Vendor examples, skills, demo/test assets, and helper binaries are not part of this
+repository.
+
 Package provenance recorded for this update:
 
 - Source archive: `Agora-RTSALite-RmRcAcAj-x86_64-linux-gnu-v1.10.1-20260828_180234-1270765.tgz`
@@ -36,9 +40,6 @@ production use and redistribution (source archives, binaries, container/firmware
 require a separate license from Agora (声网). Release maintainers must retain the applicable terms
 and written redistribution authorization in the release records before publishing an artifact that
 contains the binary; the presence of this repository copy does not itself record that authorization.
-
-Files inside the Agora example tree may carry their own copyright or license headers; those terms
-also remain in force.
 
 ## cJSON-derived implementation
 

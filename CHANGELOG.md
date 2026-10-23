@@ -21,6 +21,8 @@ This project follows Semantic Versioning.
 - Remove an unused HTTP URL limit, an unreachable RTC state, the redundant Linux OpenSSL build
   switch, and the incomplete pkg-config installation. The CMake package remains the supported
   installed integration.
+- Remove vendored Agora RTSA examples, skills, demo/test media, helper binaries, and duplicate build
+  metadata. Keep only the Linux public header, `.config`, shared library, and package provenance.
 
 ## [1.3.0] - 2026-10-19
 
