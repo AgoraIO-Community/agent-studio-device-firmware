@@ -10,6 +10,11 @@ This project follows Semantic Versioning.
 - Remove stale external-platform, footprint, endpoint, and licensing details from the guides, and
   document only the device-service fields consumed by this repository.
 
+### Removed
+
+- Remove the unused outbound RTM publish path, including its message-state API, send-result event,
+  and test-only login/logout wrappers. RTM remains internal to the conversation join lifecycle.
+
 ## [1.3.0] - 2026-10-19
 
 ### Added
