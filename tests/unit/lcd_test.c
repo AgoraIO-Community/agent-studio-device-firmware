@@ -61,13 +61,14 @@ int main(void) {
     assert(s_init_count == 2);
     assert(mybot_lcd_init(&s_lcd) < 0);
 
-    assert(mybot_lcd_show_screen(&s_lcd, MYBOT_LCD_SCREEN_WIFI_PROVISIONING) == 0);
+    mybot_lcd_content_t content = {0};
+    content.screen = MYBOT_LCD_SCREEN_WIFI_PROVISIONING;
+    assert(mybot_lcd_show_content(&s_lcd, &content) == 0);
     assert(s_render_count == 1);
     assert(s_last_content.screen == MYBOT_LCD_SCREEN_WIFI_PROVISIONING);
     assert(s_last_content.pair_code[0] == '\0');
     assert(s_last_content.indicators == MYBOT_LCD_INDICATOR_NONE);
 
-    mybot_lcd_content_t content = {0};
     content.screen = MYBOT_LCD_SCREEN_IN_CONVERSATION;
     content.indicators = MYBOT_LCD_INDICATOR_VP_REGISTERED | MYBOT_LCD_INDICATOR_LISTENING;
     assert(mybot_lcd_show_content(&s_lcd, &content) == 0);
@@ -82,8 +83,6 @@ int main(void) {
     assert(s_last_content.screen == MYBOT_LCD_SCREEN_PAIR_CODE);
     assert(strcmp(s_last_content.pair_code, "123456") == 0);
 
-    assert(mybot_lcd_show_screen(&s_lcd, MYBOT_LCD_SCREEN_PAIR_CODE) < 0);
-    assert(mybot_lcd_show_screen(&s_lcd, MYBOT_LCD_SCREEN_COUNT) < 0);
     content.screen = MYBOT_LCD_SCREEN_PAIR_CODE;
     content.indicators = MYBOT_LCD_INDICATOR_NONE;
     assert(mybot_lcd_show_content(&s_lcd, &content) < 0);
@@ -95,7 +94,8 @@ int main(void) {
     mybot_lcd_deinit(&s_lcd);
     mybot_lcd_deinit(&s_lcd);
     assert(s_destroy_count == 1);
-    assert(mybot_lcd_show_screen(&s_lcd, MYBOT_LCD_SCREEN_READY) < 0);
+    content.screen = MYBOT_LCD_SCREEN_READY;
+    assert(mybot_lcd_show_content(&s_lcd, &content) < 0);
 
     aosl_dtor();
     return 0;

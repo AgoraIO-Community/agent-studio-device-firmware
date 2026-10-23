@@ -51,6 +51,7 @@ target_sources(mybot_device_lifecycle_test PRIVATE ../src/platform/mybot_platfor
 mybot_add_test(mybot_device_client_test
     unit/device_client_test.c
     ../src/service/mybot_device_client.c
+    ../src/support/mybot_http_header.c
     ../src/support/mybot_json.c
 )
 target_link_libraries(mybot_device_client_test PRIVATE aosl ${MYBOT_TEST_SYSTEM_LIBS})
@@ -63,6 +64,8 @@ endif()
 mybot_add_test(mybot_http_client_test
     unit/http_client_test.c
     ../src/platform/mybot_https.c
+    ../src/support/mybot_http_header.c
+    ../src/support/mybot_url.c
 )
 target_link_libraries(mybot_http_client_test PRIVATE aosl ${MYBOT_TEST_SYSTEM_LIBS})
 target_sources(mybot_http_client_test PRIVATE ../src/platform/mybot_platform.c)
@@ -163,6 +166,7 @@ mybot_add_test(mybot_app_test
     ../src/media/mybot_video.c
     ../src/support/mybot_json.c
     ../src/support/mybot_ringbuf.c
+    ../src/support/mybot_url.c
 )
 target_link_libraries(mybot_app_test PRIVATE aosl ${MYBOT_TEST_SYSTEM_LIBS})
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -243,6 +247,4 @@ if(MYBOT_BUILD_LINUX_PLATFORM)
     )
     target_include_directories(mybot_linux_platform_descriptor_test PRIVATE ../platforms/linux)
     target_link_libraries(mybot_linux_platform_descriptor_test PRIVATE mybot::platform_linux)
-    target_compile_definitions(mybot_linux_platform_descriptor_test PRIVATE
-        MYBOT_LINUX_HTTPS_OPENSSL=$<BOOL:${MYBOT_LINUX_HTTPS_OPENSSL}>)
 endif()

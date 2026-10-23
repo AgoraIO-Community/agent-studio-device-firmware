@@ -20,7 +20,7 @@ int main(void) {
     assert(platform->lcd == linux_lcd_platform_console_ops());
     assert(platform->announce == linux_announce_platform_file_ops());
     assert(platform->wake_words == NULL);
-#if MYBOT_LINUX_HTTPS_OPENSSL
+#if MYBOT_ENABLE_HTTPS
     assert(platform->https == linux_https_platform_openssl_ops());
 #else
     assert(platform->https == NULL);

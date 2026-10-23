@@ -47,6 +47,11 @@ foreach(required_document LICENSE THIRD_PARTY_NOTICES.md aosl-LICENSE)
     endif()
 endforeach()
 
+file(GLOB_RECURSE installed_pkg_config "${install_prefix}/mybot.pc")
+if(installed_pkg_config)
+    message(FATAL_ERROR "CMake package installation must not install mybot.pc")
+endif()
+
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${MYBOT_SOURCE_DIR}/tests/integration/cmake_install_consumer"
             -C "${MYBOT_TEST_CONFIG_DIR}/config.cmake"

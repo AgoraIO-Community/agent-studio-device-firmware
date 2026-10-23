@@ -269,7 +269,6 @@ static int s_stop_requests;
 static int s_conversation_ended_notifications;
 static int s_media_volume_set_calls;
 static int s_last_media_volume;
-static int s_emotion_pulses;
 static char s_renewed_token[512];
 
 static size_t s_sent_lengths[TEST_MAX_SENT_FRAMES];
@@ -841,24 +840,11 @@ int mybot_lcd_init(mybot_lcd_t *lcd) {
     return s_lcd_init_fails ? -1 : 0;
 }
 
-int mybot_lcd_show_screen(mybot_lcd_t *lcd, mybot_lcd_screen_t screen) {
-    assert(lcd != NULL);
-    (void)screen;
-    return 0;
-}
-
 int mybot_lcd_show_content(mybot_lcd_t *lcd, const mybot_lcd_content_t *content) {
     assert(lcd != NULL);
     assert(content != NULL);
-    if (content->indicators & MYBOT_LCD_INDICATOR_EMOTION_MASK) {
-        observe_control_thread(0);
-        assert(content->screen == MYBOT_LCD_SCREEN_IN_CONVERSATION);
-    }
     mock_lock();
     s_last_lcd_content = *content;
-    if (content->indicators & MYBOT_LCD_INDICATOR_EMOTION_MASK) {
-        s_emotion_pulses++;
-    }
     mock_unlock();
     return 0;
 }
@@ -2483,7 +2469,6 @@ static void test_device_commands(void) {
     test_cloud_message_envelope();
     test_cloud_adjust_volume();
     int volume_calls_before = read_counter(&s_media_volume_set_calls);
-    int pulses_before = read_counter(&s_emotion_pulses);
     /* Unsupported commands and invalid levels must not consume the valid ID. */
     static const char *const unsupported[] = {
         "{\"type\":\"action\",\"name\":\"audio.adjust_volume\",\"params\":{\"delta\":-101}}",
@@ -2504,7 +2489,6 @@ static void test_device_commands(void) {
                         s_volume_command, NULL);
     drain_device_commands();
     assert(read_counter(&s_media_volume_set_calls) == volume_calls_before);
-    assert(read_counter(&s_emotion_pulses) == pulses_before);
 
     /* Timestamp metadata does not gate volume execution. */
     const char *const metadata[] = {

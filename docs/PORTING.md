@@ -156,6 +156,7 @@ to detect closure or overflow; receive calls never use zero capacity.
 The Linux reference implementation uses OpenSSL and the system CA store. Plain HTTP exists only for an
 isolated development build configured with
 `MYBOT_ENABLE_HTTPS=OFF -DMYBOT_ALLOW_INSECURE_HTTP=ON`.
+OpenSSL support is compiled into the Linux reference platform exactly when `MYBOT_ENABLE_HTTPS=ON`.
 
 ### Keys
 
@@ -180,7 +181,7 @@ Implement `mybot_lcd_ops_t` when a display exists. Render receives semantic cont
 application control owner; the SDK does not invoke it concurrently. Content is borrowed. Add the
 operations table to the platform descriptor.
 
-`mybot_lcd_content_t.indicators` is a bitmask for overlays and one-shot expressions. During
+`mybot_lcd_content_t.indicators` is a bitmask for conversation overlays. During
 `MYBOT_LCD_SCREEN_IN_CONVERSATION`, `MYBOT_LCD_INDICATOR_VP_REGISTERED` means the server completed
 voice-print registration for the active conversation. Render this as an in-conversation indicator;
 ignore bits the platform does not recognize and do not derive lifecycle state from the indicator.
@@ -189,16 +190,8 @@ only presentation state and must not change the SDK lifecycle. The
 `MYBOT_LCD_INDICATOR_LISTENING`, `MYBOT_LCD_INDICATOR_THINKING`, and
 `MYBOT_LCD_INDICATOR_SPEAKING` bits expose the server's current conversation phase; these three bits
 are mutually exclusive.
-
-The LCD contract also defines `MYBOT_LCD_INDICATOR_HAPPY`, `MYBOT_LCD_INDICATOR_SAD`,
-`MYBOT_LCD_INDICATOR_ANGRY`, and `MYBOT_LCD_INDICATOR_SURPRISED` as one-shot emotion bits.
-MCP device commands do not emit these bits. A render call containing an emotion bit starts
-a new expression, even when the bit matches the previous request. Ordinary renders have no
-emotion bit: update overlays without restarting or cancelling the current expression. The SDK
-does not retain expression commands or issue a clearing render. The platform owns expression
-presets and animation timing; a new expression replaces the unfinished one, and leaving
-`MYBOT_LCD_SCREEN_IN_CONVERSATION` ends it. Copy content needed by asynchronous rendering before
-returning, and wait for that work before `destroy()` releases the context. See
+Copy content needed by asynchronous rendering before returning, and wait for that work before
+`destroy()` releases the context. See
 [mybot_lcd.h](../include/mybot/platform/mybot_lcd.h) for the interface contract.
 
 ### Wake words (optional)
@@ -318,6 +311,7 @@ port keeps `MYBOT_BUILD_LINUX_PLATFORM=OFF`. A host may predefine an imported ta
 `agora-rtc-sdk`. Both source integration with `add_subdirectory()` and installed-package
 consumption via `find_package(mybot)` are supported. Source integration must initialize this
 project's nested AOSL submodule (`git submodule update --init --recursive` in the project checkout).
+The installed package provides CMake package files only; pkg-config metadata is not installed.
 
 ## Step 6: Start and stop
 
@@ -450,15 +444,16 @@ The device-service conversation response supplies a server-generated `rtc.uid` (
 unchanged as both the RTC user account and the local RTM UID. RTM token authentication uses a
 separate RTM credential; the current service response exposes `rtc.token`, so deployments must
 confirm that the service/app authentication mode accepts it for RTM or provide an RTM token through
-an extended service contract. The `agent_uid` value is the peer passed to
-`mybot_agora_rtc_send_rtm_data()`; the device ID is only the device-service identity and must not be
+an extended service contract. The `agent_uid` value identifies the agent allowed to deliver
+commands and indicators; the device ID is only the device-service identity and must not be
 substituted for either account.
 
 An RTM UID must be non-empty, shorter than 64 bytes, and contain only ASCII letters, digits, space,
 or the punctuation characters accepted by Agora. `mybot_agora_rtc_rtm_uid_is_valid()` exposes the
-same validation used before login. RTM login is asynchronous: a send is allowed only after the
-`MYBOT_RTM_EVENT_LOGIN` callback reports error code 0. RTM payloads are limited to 31 KiB and
-custom types to 32 bytes.
+same validation used before login. RTM login is asynchronous: inbound data is eligible for
+forwarding only after the `MYBOT_RTM_EVENT_LOGIN` callback reports error code 0. The SDK does not
+provide an outbound RTM publish API. Inbound payloads are limited to 31 KiB and custom types to
+32 bytes.
 The device-service client rejects response strings that exceed their destination buffers; RTC token
 storage reserves space for 512 bytes of content plus the terminating NUL.
 

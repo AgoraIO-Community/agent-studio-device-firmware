@@ -38,8 +38,6 @@ static aosl_atomic_t s_prompt_write_entered;
 static aosl_atomic_t s_release_prompt_write;
 static aosl_atomic_t s_short_prompt_write;
 static aosl_atomic_t s_prompt_write_result;
-static aosl_atomic_t s_zero_prompt_write;
-static aosl_atomic_t s_verify_silent_write;
 static aosl_atomic_t s_prompt_capture_enabled;
 #if MYBOT_CLOUD_AEC
 static aosl_atomic_t s_prompt_reference_seen;
@@ -160,18 +158,10 @@ static int playback_write(void *ctx, const void *buf, int frames) {
         int index = (int)aosl_atomic_add_return(1, &s_prompt_write_count);
         assert(index <= (int)(sizeof(s_prompt_write_samples) / sizeof(s_prompt_write_samples[0])));
         s_prompt_write_samples[index - 1] = ((const int16_t *)buf)[0];
-        if (index == aosl_atomic_read(&s_verify_silent_write)) {
-            for (int i = 0; i < frames; ++i) {
-                assert(((const int16_t *)buf)[i] == 0);
-            }
-        }
         if (index == aosl_atomic_read(&s_block_prompt_write)) {
             aosl_atomic_set(&s_prompt_write_entered, index);
             bool released = wait_for_atomic(&s_release_prompt_write, index);
             assert(released);
-        }
-        if (index == aosl_atomic_read(&s_zero_prompt_write)) {
-            return 0;
         }
         if (index == aosl_atomic_read(&s_short_prompt_write)) {
             return (int)aosl_atomic_read(&s_prompt_write_result);
@@ -383,8 +373,6 @@ static void init_prompt_fixture(mybot_media_pipeline_t *pipeline,
     aosl_atomic_set(&s_release_prompt_write, 0);
     aosl_atomic_set(&s_short_prompt_write, short_write);
     aosl_atomic_set(&s_prompt_write_result, write_result);
-    aosl_atomic_set(&s_zero_prompt_write, 0);
-    aosl_atomic_set(&s_verify_silent_write, 0);
     aosl_atomic_set(&s_prompt_capture_enabled, false);
 #if MYBOT_CLOUD_AEC
     aosl_atomic_set(&s_prompt_reference_seen, false);
@@ -591,78 +579,6 @@ static void check_reference(mybot_media_pipeline_t *pipeline, int frames, int16_
 #endif
 }
 
-static void test_mute_retries(const mybot_media_pipeline_callbacks_t *callbacks, int initial_result,
-                              bool hardware_volume) {
-    mybot_media_pipeline_t pipeline;
-    s_platform.audio_volume = hardware_volume ? &s_volume_ops : NULL;
-    s_device_volume = MYBOT_AUDIO_VOLUME_DEFAULT;
-    init_prompt_fixture(&pipeline, callbacks, 1, initial_result);
-    mybot_media_pipeline_set_rtc_connected(&pipeline, true);
-    int16_t rtc_frame[MYBOT_MEDIA_FRAME_SAMPLES];
-    for (int i = 0; i < MYBOT_MEDIA_FRAME_SAMPLES; ++i) {
-        rtc_frame[i] = 7;
-    }
-    mybot_media_pipeline_push_remote_audio(&pipeline, rtc_frame, sizeof(rtc_frame));
-    assert(wait_for_atomic(&s_prompt_write_entered, 1));
-    assert(s_prompt_write_samples[0] == 7);
-
-    /* A mute change applies to the remainder after a short or zero-progress write. */
-    mybot_media_pipeline_set_muted(&pipeline, true);
-    aosl_atomic_set(&s_verify_silent_write, 2);
-    aosl_atomic_set(&s_zero_prompt_write, 2);
-    aosl_atomic_set(&s_block_prompt_write, 2);
-    aosl_atomic_set(&s_release_prompt_write, 1);
-    assert(wait_for_atomic(&s_prompt_write_entered, 2));
-    check_reference(&pipeline, initial_result, 7);
-    assert(mybot_media_pipeline_set_volume(&pipeline, 50) == 0);
-    assert(aosl_atomic_read(&pipeline.muted));
-    mybot_media_pipeline_set_muted(&pipeline, false);
-    aosl_atomic_set(&s_block_prompt_write, 3);
-    aosl_atomic_set(&s_release_prompt_write, 2);
-    assert(wait_for_atomic(&s_prompt_write_entered, 3));
-    int16_t expected_rtc = hardware_volume ? 7 : 4;
-    assert(s_prompt_write_samples[2] == expected_rtc);
-    aosl_atomic_set(&s_release_prompt_write, 3);
-    assert(wait_for_playback_generation(&pipeline));
-    check_reference(&pipeline, MYBOT_MEDIA_FRAME_SAMPLES - initial_result, expected_rtc);
-
-    /* Accepted muted RTC PCM contributes only silence to the cloud AEC reference. */
-    mybot_media_pipeline_set_muted(&pipeline, true);
-    aosl_atomic_set(&s_verify_silent_write, 4);
-    aosl_atomic_set(&s_block_prompt_write, 4);
-    mybot_media_pipeline_push_remote_audio(&pipeline, rtc_frame, sizeof(rtc_frame));
-    assert(wait_for_atomic(&s_prompt_write_entered, 4));
-    aosl_atomic_set(&s_release_prompt_write, 4);
-    assert(wait_for_playback_generation(&pipeline));
-    check_reference(&pipeline, MYBOT_MEDIA_FRAME_SAMPLES, 0);
-
-    /* Prompt output is muted without touching capture or destroying its pending PCM. */
-    aosl_atomic_set(&s_verify_silent_write, 5);
-    aosl_atomic_set(&s_short_prompt_write, 5);
-    aosl_atomic_set(&s_prompt_write_result, 0);
-    aosl_atomic_set(&s_block_prompt_write, 5);
-    assert(mybot_media_pipeline_play_prompt(&pipeline, MYBOT_PROMPT_PAIR_CODE, "") == 0);
-    assert(wait_for_atomic(&s_prompt_write_entered, 5));
-    check_reference(&pipeline, 0, 0);
-    int sends_before = (int)aosl_atomic_read(&s_send_calls);
-    aosl_atomic_set(&s_prompt_capture_enabled, true);
-    assert(wait_for_sends(sends_before + 1, 1000));
-    mybot_media_pipeline_set_muted(&pipeline, false);
-    aosl_atomic_set(&s_block_prompt_write, 6);
-    aosl_atomic_set(&s_release_prompt_write, 5);
-    assert(wait_for_atomic(&s_prompt_write_entered, 6));
-    assert(s_prompt_write_samples[5] == (hardware_volume ? 1000 : 500));
-    mybot_media_pipeline_stop_prompt(&pipeline);
-    aosl_atomic_set(&s_block_prompt_write, 0);
-    aosl_atomic_set(&s_release_prompt_write, 6);
-    assert(wait_for_playback_generation(&pipeline));
-    check_reference(&pipeline, 0, 0);
-    assert(mybot_media_pipeline_stop(&pipeline) == 0);
-    assert(mybot_media_pipeline_destroy(&pipeline) == 0);
-    aosl_atomic_set(&s_prompt_fixture, false);
-    s_platform.audio_volume = NULL;
-}
-
 static void test_hardware_volume(const mybot_media_pipeline_callbacks_t *callbacks) {
     mybot_media_pipeline_t pipeline;
     s_platform.audio_volume = &s_volume_ops;
@@ -690,10 +606,7 @@ static void test_hardware_volume(const mybot_media_pipeline_callbacks_t *callbac
     s_device_volume = -1;
     assert(mybot_media_pipeline_adjust_volume(&pipeline, 10) < 0);
     s_device_volume = 45;
-    mybot_media_pipeline_set_muted(&pipeline, true);
     assert(mybot_media_pipeline_set_volume(&pipeline, 55) == 0);
-    assert(aosl_atomic_read(&pipeline.muted));
-    mybot_media_pipeline_set_muted(&pipeline, false);
     assert(s_device_volume == 55 && pipeline.audio.device_volume == 55);
     assert(mybot_audio_get_media_volume(&pipeline.audio) == MYBOT_AUDIO_VOLUME_DEFAULT);
     assert(mybot_media_pipeline_stop(&pipeline) == 0);
@@ -707,7 +620,6 @@ int main(void) {
     assert(mybot_media_pipeline_destroy(NULL) < 0);
     assert(mybot_media_pipeline_set_volume(NULL, 50) < 0);
     assert(mybot_media_pipeline_adjust_volume(NULL, 10) < 0);
-    mybot_media_pipeline_set_muted(NULL, true);
 
     aosl_ctor();
     aosl_atomic_set(&s_playback_writes, 0);
@@ -837,9 +749,6 @@ int main(void) {
     test_stop_prompt_during_write(&callbacks, 0);
     test_prompt_aec_reference(&callbacks);
     test_hardware_volume(&callbacks);
-    test_mute_retries(&callbacks, MYBOT_MEDIA_FRAME_SAMPLES / 2, false);
-    test_mute_retries(&callbacks, 0, false);
-    test_mute_retries(&callbacks, MYBOT_MEDIA_FRAME_SAMPLES / 2, true);
     aosl_dtor();
     puts("media_pipeline_test: ok");
     return 0;

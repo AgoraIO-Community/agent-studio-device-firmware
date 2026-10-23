@@ -89,14 +89,11 @@ git -C "$repo_root" archive "$commit" | tar -xf - -C "$work_dir/$name"
 mkdir -p -- "$work_dir/$name/third_party/aosl"
 git -C "$aosl_dir" archive "$aosl_commit" | tar -xf - -C "$work_dir/$name/third_party/aosl"
 
-# Keep RTSA headers and build metadata, matching the existing source releases.
+# Keep the RTSA header and build metadata; the shared library is not redistributed.
 # GNU tar metadata normalization plus gzip -n makes repeated builds byte-identical.
 timestamp=$(git -C "$repo_root" show -s --format=%ct "$commit")
 tar --sort=name --format=gnu --mtime="@$timestamp" --owner=0 --group=0 --numeric-owner \
     --exclude="$name/third_party/agora_rtsa_sdk/agora_sdk/lib" \
-    --exclude="$name/third_party/agora_rtsa_sdk/agora_sdk/bin" \
-    --exclude="$name/third_party/agora_rtsa_sdk/example/out" \
-    --exclude="$name/third_party/agora_rtsa_sdk/example/third-party/file_parser/lib" \
     -cf - -C "$work_dir" "$name" | gzip -n > "$work_dir/$archive"
 (cd -- "$work_dir" && sha256sum "$archive") > "$work_dir/$checksums"
 mkdir -p -- "$output_dir"
