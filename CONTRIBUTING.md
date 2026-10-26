@@ -1,6 +1,9 @@
 # Contributing
 
-Contributions are welcome. Public APIs and ABI follow Semantic Versioning.
+Contributions are welcome. The public source API follows Semantic Versioning. Binary ABI
+compatibility is not currently guaranteed, so SDK consumers and platform adapters must be rebuilt
+against the selected headers. Extending a public structure is a source-compatible change only after
+those components are rebuilt.
 
 > [English](CONTRIBUTING.md) | [简体中文](CONTRIBUTING.zh-CN.md)
 

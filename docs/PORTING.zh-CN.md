@@ -4,8 +4,9 @@
 
 本文介绍如何将当前 mybot 版本集成到产品。接口契约、所有权和回调线程要求以
 [mybot.h](../include/mybot/mybot.h) 与[平台公共头文件](../include/mybot/platform/)为准。
-公开 API 与 ABI 遵循语义化版本。平台代码必须只包含 `include/mybot` 下的头文件，
-并链接 `mybot::sdk`。
+公开源码 API 遵循语义化版本。二进制 ABI 不保证跨版本兼容，包括公开结构体增加字段的情况。
+SDK 与平台适配层必须使用同一版本的选定头文件重新构建；不要混用基于不同 mybot 头文件版本
+预编译的组件。平台代码必须只包含 `include/mybot` 下的头文件，并链接 `mybot::sdk`。
 
 mybot 设计为可移植到几乎任意平台——Linux、RTOS 或裸机——只要 AOSL 有对应的
 `CONFIG_PLATFORM` 移植、且目标 ABI 存在 Agora RTSA 库。无论宿主操作系统或芯片厂商如何，
@@ -80,8 +81,9 @@ SDK 仓库保留 Linux 参考实现，不再同步 MCU 源码副本。
 
 - **设备音量**是首选路径。实现 `mybot_audio_volume_ops_t` 并加入平台描述符，即可让 SDK
   的音量变化路由到真实硬件（Codec 寄存器、功放或混音器）。`init`、`set_volume`、
-  `destroy` 为必需；`get_volume` 可选，
-  仅用于同步 SDK 的音量状态。SDK 在启动时初始化该实现，关闭时释放。
+  `destroy` 为必需；`get_volume` 可选。提供该回调时，SDK 会在初始化后读取一次以同步音量
+  状态，并在每次相对调整前再次读取，包括音量按键和 `audio.adjust_volume` 命令。若读取失败
+  或返回超出范围的值，该次调整会失败。SDK 在启动时初始化该实现，关闭时释放。
 - **媒体音量**是未注册设备音量实现时的兜底。SDK 保存 0..100 的软件增益，播放流水线在
   PCM 到达设备前以数字方式应用（线性幅度，100 为原增益）。无需平台代码。
 
@@ -299,9 +301,10 @@ while (mybot_is_running()) platform_sleep_ms(100);
 mybot_stop();
 ```
 
-从 [README 的设备服务地址](../README.zh-CN.md#设备服务地址)中选择 `server_base`，
-保留 `/api` 且末尾不带 `/`。产品层按[设备 ID 生成](#设备-id-生成)规则生成 `device_id`，
-并保证两个字段均以 NUL 结尾。`mybot_start()` 建立 SDK 控制线程与网络监听，
+`server_base` 使用部署方提供的设备服务基础 URL。SDK 会校验该 URL，并拼接
+[设备服务兼容性](#设备服务兼容性)中列出的请求路径。产品层按
+[设备 ID 生成](#设备-id-生成)规则生成 `device_id`，并保证两个字段均以 NUL 结尾。
+`mybot_start()` 建立 SDK 控制线程与网络监听，
 首次收到已连接事件后才启动设备服务。
 历史名称
 `MYBOT_STATE_WIFI_PROVISIONING` 与 `MYBOT_LCD_SCREEN_WIFI_PROVISIONING` 表示等待初次网络
@@ -335,8 +338,8 @@ RTSA 生命周期通过 `agora_rtc_init()` / `agora_rtc_fini()` 管理。宿主�
 结束会话时，SDK 先停止本地视频与 RTC，再清理本次会话的 PCM。在线挂断会先恢复到
 `MYBOT_STATE_READY`，最后使用原停止原因排队发送一次 HTTPS 停止通知。控制线程不等待
 这次通知，因此后台轮询或停止请求变慢不会延迟下一次会话触发。通知失败不重试；兼容的
-设备服务也会在设备离开 RTC channel 后结束远端会话。离线会话仅在本地结束，不发送 HTTPS
-停止通知。
+设备服务必须在设备离开 RTC channel 后独立结束远端会话。离线会话仅在本地结束，不发送
+HTTPS 停止通知。
 
 配对码、开始会话和 RTC token 续期请求仍在控制线程同步执行，下面介绍的 RTM 登录/订阅
 等待也保持同步；这些操作本身的耗时仍会延迟后续控制工作。关闭时先停止接受后台工作和
@@ -356,7 +359,7 @@ RTSA 生命周期通过 `agora_rtc_init()` / `agora_rtc_fini()` 管理。宿主�
 | 请求 | SDK 行为与消费的响应字段 |
 | --- | --- |
 | `POST /devices/pair-codes` | 无鉴权；发送 `device_id`、可选 `firmware_version` 和 `hardware_model`；要求 `data.code`、`data.pair_token`，可选 `data.poll_after_seconds`。 |
-| `GET /devices/{device_id}/binding-status` | 使用 `Pair` 或 `Device` 授权；消费 `data.status`、可选 `data.device_token` 和 `data.poll_after_seconds`。 |
+| `GET /devices/{device_id}/binding-status` | 使用 `Pair` 或 `Device` 授权；消费 `data.status`，并在存在时消费 `data.device_token`、`data.agent_id`、`data.agent_name` 和 `data.poll_after_seconds`。 |
 | `POST /devices/{device_id}/conversations/start` | 使用 `Device` 授权；发送 `trigger: "button"`、配置的音频 `p_time` 和 G722 codec，以及配置的特性开关；要求 `data.conversation_id`、顶层 `agent_uid`，以及 `data.rtc.app_id`、`channel`、`uid`。无鉴权 channel 的 `rtc.token` 可以为空。 |
 | `POST /devices/{device_id}/rtc-token` | 使用 `Device` 授权；发送 `channel`、`local_uid`；要求 `data.rtc.channel`、`uid`、`token`。 |
 | `POST /devices/{device_id}/conversations/stop` | 使用 `Device` 授权；发送 `conversation_id`、`reason`；HTTP 2xx 即视为成功。 |
@@ -391,19 +394,21 @@ RTM token 鉴权时应使用独立的 RTM 凭据；当前服务响应只提供 `
 允许下发命令和指示的 agent；设备 ID 仅用于设备服务身份，不能替代这两个账号。
 
 RTM UID 必须非空、长度小于 64 字节，并且只能包含 Agora 接受的 ASCII 字母、数字、空格和
-标点字符。`mybot_agora_rtc_rtm_uid_is_valid()` 暴露了登录前使用的同一校验规则。RTM 登录是
-异步的：只有 `MYBOT_RTM_EVENT_LOGIN` 回调的错误码为 0 后，入站消息才会被转发。SDK 不提供
-主动发送 RTM 消息的接口。入站负载上限为 31 KiB，custom type 上限为 32 字节。
+标点字符。内部 RTC 封装会在登录前执行该校验，不导出公共 RTM UID 校验接口。RTM 登录是异步的，
+SDK 只在登录成功后处理入站消息。SDK 不提供主动发送 RTM 消息的接口。入站负载上限为 31 KiB，
+custom type 上限为 32 字节。
 设备服务客户端会拒绝超出目标缓冲区的响应字符串；RTC token 缓冲区为 512 字节内容预留了
 额外的结尾 NUL 字节。
 
-会话启动时 SDK 会先请求 RTM 登录，并最多等待 5 秒直到收到成功的
-`MYBOT_RTM_EVENT_LOGIN` 回调；随后订阅与 RTC channel 同名的 RTM channel，并最多等待 5 秒
-直到订阅成功。两步均成功前不会创建或加入 RTC connection，因此平台必须保证 control owner
-等待期间 RTM 回调线程仍可运行。声纹状态只接受当前会话 channel、当前 agent 发送且字段严格
-匹配 `"object":"message.sal_status"` 与 `"status":"VP_REGISTER_SUCCESS"` 的消息。SDK 在
-会话开始和结束时重置这些状态，并通过 `MYBOT_LCD_INDICATOR_VP_REGISTERED` 暴露声纹成功指示，
-通过三个服务端状态位暴露对话阶段；P2P RTM 回调继续保留用于点对点消息。
+会话启动时 SDK 会先请求 RTM 登录，并最多等待 5 秒直到登录成功；随后订阅与 RTC channel 同名
+的 RTM channel，并最多等待 5 秒直到订阅成功。两步均成功前不会创建或加入 RTC connection，
+因此平台必须保证 control owner 等待期间 RTM 回调线程仍可运行。声纹状态只接受当前会话
+channel、当前 agent 发送且字段严格匹配 `"object":"message.sal_status"` 与
+`"status":"VP_REGISTER_SUCCESS"` 的消息。SDK 在会话开始和结束时重置这些状态，并通过
+`MYBOT_LCD_INDICATOR_VP_REGISTERED` 暴露声纹成功指示，通过三个服务端状态位暴露对话阶段。
+
+P2P RTM 接收路径是 RTC 封装内部实现，仅用于处理 SDK 支持的入站消息。SDK 不向应用公开
+RTM 登录、P2P 接收或订阅 channel 的回调接口。
 
 ### MCP 设备命令
 

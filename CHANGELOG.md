@@ -1,6 +1,8 @@
 # Changelog
 
-This project follows Semantic Versioning.
+This project follows Semantic Versioning for its public source API. Binary ABI compatibility is
+not currently guaranteed; consumers and platform adapters must be rebuilt against the selected
+headers.
 
 ## [Unreleased]
 
@@ -9,6 +11,8 @@ This project follows Semantic Versioning.
 - Refresh the Chinese and English pairing-code prompt and digit audio.
 - Remove stale external-platform, footprint, endpoint, and licensing details from the guides, and
   document only the device-service fields consumed by this repository.
+- Align dependency, volume, KV error, RTM boundary, service contract, and source-API/ABI
+  compatibility documentation with the current implementation.
 - Use one bounded URL parser for startup configuration and HTTP requests, and one strict printable
   header-value validator for request headers and device authorization credentials.
 
