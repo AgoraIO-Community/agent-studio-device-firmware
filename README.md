@@ -13,8 +13,10 @@ pairing and authentication, a conversation state machine, full-duplex voice inte
 with Agora AI capabilities), optional device-video uplink, button/LCD workflows, and optional local
 wake-word recognition.
 Platform-specific capabilities are injected through a small set of `ops` interfaces;
-the core depends only on C99 and AOSL and can be ported to virtually any platform — Linux, an
-RTOS, or a bare-metal MCU.
+the SDK's language and runtime abstraction depends on C99 and AOSL, while RTC transport additionally
+requires an [Agora RTSA SDK](https://doc.shengwang.cn/doc/rtsa/c/landing-page) built for the target
+ABI. With those dependencies, it can be ported to platforms such as Linux, an RTOS, or a bare-metal
+MCU.
 
 > Current version: **1.3.0**. The bundled Agora RTSA
 > binary and AOSL have separate licensing and usage terms; read
@@ -43,9 +45,9 @@ RTOS, or a bare-metal MCU.
 - **Multimodal device input**: Optionally upload platform-encoded camera frames so the cloud AI agent
   can perform visual recognition alongside voice. JPEG, H.264, and H.265 are supported; video is
   uplink-only and the server does not send video back to the device.
-- **Portable to virtually any platform**: The core depends only on C99 and AOSL, and device
-  capabilities are injected through the `ops` contract, so it never touches any OS or peripheral
-  API directly — Linux, an RTOS, or a bare-metal MCU.
+- **Portable across supported targets**: The SDK's language and runtime abstraction depends on C99
+  and AOSL, while RTC requires an Agora RTSA SDK built for the target ABI. Device capabilities are
+  injected through the `ops` contract, so the core never touches an OS or peripheral API directly.
 - **Connectivity integration**: The product owns provisioning; the SDK observes the usable network
   and its runtime disconnect/reconnect events.
 - **Pairing and authentication**: Pair code → device claim → persisted long-lived credential, with
@@ -73,8 +75,8 @@ RTOS, or a bare-metal MCU.
 - **Cloud MCP device commands**: Receive session-bound DeviceCommand v1 messages over RTM to
   set playback volume with `audio.set_volume` or raise/lower it with `audio.adjust_volume`, using
   the cloud's `message.user` envelope.
-  The cloud owns MCP tool invocation; the SDK reuses its media volume path. Integration is
-  described in [PORTING.md](docs/PORTING.md#mcp-device-commands).
+  The cloud owns MCP tool invocation; the SDK reuses the same playback-volume path used by volume
+  keys. Integration is described in [PORTING.md](docs/PORTING.md#mcp-device-commands).
 - **Pairing-code voice prompt**: Once per pair code, plays a fixed prompt ("Please enter the
   pairing code in the console") followed by one sound per digit through the normal speaker path. Assets are raw
   16 kHz mono s16 PCM files under `./assets/locales/<locale>/` (`prompt.pcm`, `0.pcm`..`9.pcm`);
@@ -160,8 +162,10 @@ lower the volume, `e` to exit.
 
 The Linux reference implementation is a **development stand-in**: it reuses the host network and
 reports STA as connected immediately; it does not implement real APSTA provisioning. Audio uses the
-ALSA `default` device. KV data is written to `.mybot-kv-store/` in the current directory by default;
-override the location with the `MYBOT_KV_STORE_DIR` environment variable.
+ALSA `default` device and registers an ALSA mixer volume implementation when a supported mixer
+control is available; otherwise playback uses software gain. KV data is written to
+`.mybot-kv-store/` in the current directory by default; override the location with the
+`MYBOT_KV_STORE_DIR` environment variable.
 
 ## Integrating into a host project
 
