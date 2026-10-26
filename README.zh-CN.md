@@ -9,8 +9,10 @@
 语音和可选的设备摄像头视频发送给云端 AI Agent，进行实时对话和视觉识别。平台/应用负责
 配网流程和 Wi-Fi 凭据；SDK 消费网络
 连接事件，并负责设备配对与认证、会话状态机、全双工语音交互（Agora RTSA 与 Agora AI
-能力）、可选的设备视频上行、按键/LCD 工作流以及可选的本地唤醒词识别。平台相关能力通过一组小型 `ops` 接口注入，SDK 核心只依赖 C99 与 AOSL，理论上
-可移植到任意平台——Linux、RTOS 或裸机 MCU。
+能力）、可选的设备视频上行、按键/LCD 工作流以及可选的本地唤醒词识别。平台相关能力通过
+一组小型 `ops` 接口注入。SDK 的语言与运行时抽象依赖 C99 与 AOSL；RTC 传输额外要求目标
+ABI 对应的 [Agora RTSA SDK](https://doc.shengwang.cn/doc/rtsa/c/landing-page)。在这些依赖
+就绪时，可移植到 Linux、RTOS 或裸机 MCU 等平台。
 
 > 当前版本为 **1.3.0**。仓库内置的 Agora RTSA 二进制与
 > AOSL 有独立的许可及使用条件；用于产品前请阅读[许可证与第三方依赖](#许可证与第三方依赖)。
@@ -36,8 +38,8 @@
   （ASR / LLM / TTS）由云端编排。
 - **多模态设备输入**：可选上传由平台编码的摄像头视频，让云端 AI Agent 结合语音进行
   视觉识别。支持 JPEG、H.264、H.265；视频仅上行，服务端不会向设备端发送视频。
-- **任意平台可移植**：核心只依赖 C99 与 AOSL，设备能力通过 `ops` 契约注入，不直接触碰
-  任何 OS 或外设 API；理论上可移植到 Linux、RTOS、裸机等任意平台。
+- **面向受支持目标可移植**：SDK 的语言与运行时抽象依赖 C99 与 AOSL，RTC 额外要求目标
+  ABI 对应的 Agora RTSA SDK。设备能力通过 `ops` 契约注入，核心不直接触碰 OS 或外设 API。
 - **网络连接集成**：产品负责配网，SDK 监听可用网络及运行期间的断线、重连事件。
 - **配对与认证**：配对码 → 设备认领 → 长期凭证持久化，认证失效时自动重新配对。
 - **会话状态机**：`unprovisioned / pairing / awaiting_claim / runtime / in_conversation` 五态
@@ -47,8 +49,8 @@
 - **全双工语音 · 支持打断**：上行与下行同时进行；AI 回复期间用户可随时说话打断，
   麦克风持续上行，云端 Agent 感知新输入并即时响应。
 - **全双工语音交互 · Agora AI 能力**：基于 Agora RTSA，支持云端 AEC 与 AI QoS。
-- **音量控制**：两个相互独立的层次——SDK 管理的媒体音量（对播放 PCM 做数字软件增益，
-  所有平台可用）与可选的设备真实音量实现（Codec / 功放 / 混音器），由平台注册。
+- **音量控制**：SDK 统一管理播放音量。平台注册设备真实音量实现（Codec / 功放 / 混音器）
+  时，音量变化直接驱动硬件；未注册或初始化失败时，回退为对播放 PCM 应用软件增益。
 - **可选的本地唤醒词**：默认关闭；唤醒行为与物理按键启动会话一致。
 - **按键与 LCD 工作流**：语义化屏幕状态（等待网络 / 配对 / 配对码 / 就绪 / 会话中），显示方式由
   平台决定。
@@ -58,7 +60,7 @@
 - **云端 MCP 设备命令**：通过 RTM 接收绑定当前会话的 DeviceCommand v1 消息，控制播放
   音量，支持 `message.user` 封装内的 `audio.set_volume` 及增大/减小音量的
   `audio.adjust_volume`。MCP 工具调用由云端负责，SDK
-  复用现有媒体音量路径。集成说明见
+  复用与音量按键相同的播放音量路径。集成说明见
   [PORTING.zh-CN.md](docs/PORTING.zh-CN.md#mcp-设备命令)。
 - **配对码语音播报**：每个配对码只播报一次，先播固定提示句（“请在控制台输入配对码”），
   再逐位播报数字，走正常扬声器链路。音频资源为 `./assets/locales/<locale>/` 下的原始 16 kHz
@@ -129,11 +131,12 @@ ctest --test-dir build --output-on-failure
 `./assets/locales/<locale>/`（原始 16 kHz 单声道 16-bit PCM：`prompt.pcm`、`0.pcm`~`9.pcm`）。
 默认语言为 `zh-CN`，可用 `MYBOT_LOCALE` 与 `MYBOT_ASSETS_DIR` 覆盖。
 
-就绪后输入 `s` 开始会话、`q` 停止会话、`p` 重新配对、`u` / `d` 增大 / 减小媒体音量、
+就绪后输入 `s` 开始会话、`q` 停止会话、`p` 重新配对、`u` / `d` 增大 / 减小播放音量、
 `e` 退出。
 
 Linux 参考实现是**开发替身**：它直接使用宿主机现有网络并立即报告网络可用，不实现真实
-APSTA 配网；音频使用 ALSA `default` 设备；KV 数据默认写入当前目录的 `.mybot-kv-store/`，
+APSTA 配网；音频使用 ALSA `default` 设备，并注册 ALSA mixer 音量实现，在存在受支持的混音器
+控件时直接调整硬件音量，否则回退到软件增益；KV 数据默认写入当前目录的 `.mybot-kv-store/`，
 可用环境变量 `MYBOT_KV_STORE_DIR` 修改。
 
 ## 集成到宿主工程
@@ -167,7 +170,7 @@ target_link_libraries(device_firmware PRIVATE mybot::sdk)
 播放回调表，然后一次性提交完整描述符；`mybot_start()` 再按当前构建与运行配置检查所需 ops，并在创建
 任何平台资源之前拒绝缺失项。所有平台功能均通过这个描述符一次性注册，不再提供独立的分项
 注册入口。完整实现顺序、最小代码、线程约束和验收清单见
-[docs/PORTING.md](docs/PORTING.md)。
+[docs/PORTING.zh-CN.md](docs/PORTING.zh-CN.md)。
 
 产品先完成配网，再启动 MyBot；重新进入配网前先停止 MyBot。SDK 负责的设备服务配对
 和会话与网络配网相互独立。集成顺序与代码示例见

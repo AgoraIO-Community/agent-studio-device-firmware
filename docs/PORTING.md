@@ -5,7 +5,10 @@
 This guide describes how to integrate the current mybot release into a product. Public API contracts,
 including ownership and callback threading, are defined in
 [mybot.h](../include/mybot/mybot.h) and the
-[platform headers](../include/mybot/platform/). Public APIs and ABI follow Semantic Versioning.
+[platform headers](../include/mybot/platform/). The public source API follows Semantic Versioning.
+Binary ABI compatibility is not guaranteed across releases, including when public structures gain
+fields. Build the SDK and platform adapters against the same selected headers; do not mix
+precompiled components built against different mybot header versions.
 Platform code must include only headers under `include/mybot` and link `mybot::sdk`.
 
 mybot is designed to be portable to virtually any platform — Linux, an RTOS, or bare metal — as
@@ -88,8 +91,10 @@ example from volume key events) take one of two paths:
 - **Device volume** is the primary path. Implement `mybot_audio_volume_ops_t` and add it to the
   platform descriptor to route the SDK's volume changes to real hardware (codec register,
   amplifier, or mixer). `init`, `set_volume`, and `destroy` are required;
-  `get_volume` is optional and used only to sync the SDK's volume state. The SDK initializes
-  the implementation during startup and releases it on shutdown.
+  `get_volume` is optional. When provided, the SDK calls it after initialization to sync its
+  volume state and before every relative adjustment, including volume-key events and
+  `audio.adjust_volume` commands. If it fails or reports an out-of-range value, that adjustment
+  fails. The SDK initializes the implementation during startup and releases it on shutdown.
 - **Media volume** is the fallback used when no device volume implementation is active. The SDK keeps a
   0..100 software gain and the playback pipeline applies it digitally to downlink PCM before it
   reaches the device (linear amplitude, 100 = unity gain). No platform code is required.
@@ -341,8 +346,9 @@ while (mybot_is_running()) platform_sleep_ms(100);
 mybot_stop();
 ```
 
-Choose `server_base` from the [regional device-service addresses](../README.md#device-service-addresses),
-including `/api` without a trailing slash. Generate `device_id` in the product layer according to
+Use the deployment-supplied device-service base URL as `server_base`. The SDK validates it and
+appends the request paths listed in [Device-service compatibility](#device-service-compatibility).
+Generate `device_id` in the product layer according to
 [Device ID generation](#device-id-generation), keeping both fields NUL-terminated.
 `mybot_start()` sets up the SDK control worker and network listener; device services
 start after the listener's first connected event. The historical `MYBOT_STATE_WIFI_PROVISIONING` and
@@ -384,9 +390,9 @@ the control worker discards results from an earlier network or binding generatio
 Conversation teardown first stops local video and RTC, then flushes session PCM. An online hangup
 returns to `MYBOT_STATE_READY` before queuing one HTTPS stop notification with the original reason.
 The control worker does not wait for this notification, so a slow background poll or stop request
-does not delay the next conversation trigger. The notification is not retried on failure; the
-compatible device service also ends the remote conversation when the device leaves the RTC
-channel. Offline conversations end locally without an HTTPS stop notification.
+does not delay the next conversation trigger. The notification is not retried on failure, so a
+compatible device service must independently end the remote conversation when the device leaves
+the RTC channel. Offline conversations end locally without an HTTPS stop notification.
 
 Pair-code, conversation-start, and RTC-token renewal requests still run synchronously on the control
 worker, as do the RTM login/subscription waits described below. Their own latency can delay later
@@ -408,7 +414,7 @@ The device service is external to this repository. The SDK appends these paths t
 | Request | SDK behavior and consumed response fields |
 | --- | --- |
 | `POST /devices/pair-codes` | Unauthenticated; sends `device_id`, optional `firmware_version` and `hardware_model`; requires `data.code` and `data.pair_token`, with optional `data.poll_after_seconds`. |
-| `GET /devices/{device_id}/binding-status` | Uses `Pair` or `Device` authorization; consumes `data.status`, optional `data.device_token`, and `data.poll_after_seconds`. |
+| `GET /devices/{device_id}/binding-status` | Uses `Pair` or `Device` authorization; consumes `data.status` and, when present, `data.device_token`, `data.agent_id`, `data.agent_name`, and `data.poll_after_seconds`. |
 | `POST /devices/{device_id}/conversations/start` | Uses `Device` authorization; sends `trigger: "button"`, the configured audio `p_time` and G722 codec, and configured feature flags; requires `data.conversation_id`, top-level `agent_uid`, and `data.rtc.app_id`, `channel`, and `uid`. `rtc.token` may be empty for a no-auth channel. |
 | `POST /devices/{device_id}/rtc-token` | Uses `Device` authorization; sends `channel` and `local_uid`; requires `data.rtc.channel`, `uid`, and `token`. |
 | `POST /devices/{device_id}/conversations/stop` | Uses `Device` authorization; sends `conversation_id` and `reason`; success requires a 2xx HTTP status. |
@@ -449,24 +455,27 @@ commands and indicators; the device ID is only the device-service identity and m
 substituted for either account.
 
 An RTM UID must be non-empty, shorter than 64 bytes, and contain only ASCII letters, digits, space,
-or the punctuation characters accepted by Agora. `mybot_agora_rtc_rtm_uid_is_valid()` exposes the
-same validation used before login. RTM login is asynchronous: inbound data is eligible for
-forwarding only after the `MYBOT_RTM_EVENT_LOGIN` callback reports error code 0. The SDK does not
-provide an outbound RTM publish API. Inbound payloads are limited to 31 KiB and custom types to
-32 bytes.
+or the punctuation characters accepted by Agora. The internal RTC wrapper applies this validation
+before login; no public RTM UID-validation API is exported. RTM login is asynchronous, and the SDK
+processes inbound messages only after login succeeds. The SDK does not provide an outbound RTM
+publish API. Inbound payloads are limited to 31 KiB and custom types to 32 bytes.
 The device-service client rejects response strings that exceed their destination buffers; RTC token
 storage reserves space for 512 bytes of content plus the terminating NUL.
 
-Conversation startup requests RTM login first and waits up to five seconds for a successful
-`MYBOT_RTM_EVENT_LOGIN` callback. It then subscribes to the RTM channel whose name matches the RTC
-channel and waits up to five seconds for subscription success. The SDK does not create or join the
-RTC connection until both operations succeed, so platforms must allow RTM callbacks to run while
-the control owner is waiting. Voiceprint status accepts only a channel message whose exact fields are
-`"object":"message.sal_status"` and `"status":"VP_REGISTER_SUCCESS"`, from the current agent on
-the current conversation channel. It also accepts `state.listening`, `state.thinking`, and
-`state.speaking` messages with a boolean `payload.value` and exposes them as mutually exclusive LCD
-indicators. The SDK resets these indicators at conversation boundaries and exposes success through
-`MYBOT_LCD_INDICATOR_VP_REGISTERED`; the P2P RTM callback remains available for direct messages.
+Conversation startup requests RTM login first and waits up to five seconds for login success. It
+then subscribes to the RTM channel whose name matches the RTC channel and waits up to five seconds
+for subscription success. The SDK does not create or join the RTC connection until both operations
+succeed, so platforms must allow RTM callbacks to run while the control owner is waiting. Voiceprint
+status accepts only a channel message whose exact fields are `"object":"message.sal_status"` and
+`"status":"VP_REGISTER_SUCCESS"`, from the current agent on the current conversation channel. It
+also accepts `state.listening`, `state.thinking`, and `state.speaking` messages with a boolean
+`payload.value` and exposes them as mutually exclusive LCD indicators. The SDK resets these
+indicators at conversation boundaries and exposes success through
+`MYBOT_LCD_INDICATOR_VP_REGISTERED`.
+
+The P2P RTM receive path is internal to the RTC wrapper and is used for supported inbound messages.
+The SDK does not expose RTM login, P2P receive, or subscribed-channel callbacks as public
+application APIs.
 
 ### MCP device commands
 
