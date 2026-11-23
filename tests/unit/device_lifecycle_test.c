@@ -190,7 +190,7 @@ int mybot_device_client_get_binding_status(const char *base_url, const char *dev
 }
 
 int mybot_device_client_start_conversation(const char *base_url, const char *device_id,
-                                           const char *device_token, const char *body_params,
+                                           const char *device_token,
                                            mybot_device_conversation_t *resp) {
     if (!base_url || !device_id || !device_token || !resp) {
         return -1;
@@ -198,7 +198,6 @@ int mybot_device_client_start_conversation(const char *base_url, const char *dev
     (void)base_url;
     (void)device_id;
     (void)device_token;
-    (void)body_params;
     s_start_call_count++;
     if (s_disconnect_during_start) {
         mybot_device_lifecycle_set_network_available(&s_lifecycle, false);
@@ -286,7 +285,6 @@ static int mock_submit_service_request(mybot_device_service_request_t *request, 
         assert(s_lifecycle.conversation_id[0] == '\0');
         assert(s_lifecycle.rtc_channel[0] == '\0');
         assert(s_lifecycle.rtc_uid[0] == '\0');
-        assert(s_lifecycle.rtc_agent_uid[0] == '\0');
         assert(!s_lifecycle.rtc_token_renewal_pending);
         assert(aosl_atomic_read(&s_lifecycle.rtc_token_renewal_requested) == 0);
         assert(s_lifecycle.rtc_token_retry_delay_ticks == 0);
@@ -718,7 +716,6 @@ static void test_renewal_without_callback(const mybot_device_lifecycle_callbacks
     assert(s_lifecycle.rtc_token_retry_ticks_remaining == 0);
     assert(s_lifecycle.rtc_channel[0] == '\0');
     assert(s_lifecycle.rtc_uid[0] == '\0');
-    assert(s_lifecycle.rtc_agent_uid[0] == '\0');
 
     start_conversation();
     tick_many(20);
@@ -1450,15 +1447,19 @@ int main(void) {
     invalid_auth.device_token[0] = '\0';
     expect_auth_record_rejected(&invalid_auth, sizeof(invalid_auth));
 
+    /* A storage failure preserves the original binding for the next startup. */
     install_auth_record(&valid_auth, sizeof(valid_auth));
     s_kv_store_get_result = -1;
-    lifecycle_init(&s_lifecycle, &s_kv_store, "http://server", "device-1", NULL, NULL, NULL);
-    s_kv_store_get_result = 0;
-    assert(lifecycle_state(&s_lifecycle) == MYBOT_DEVICE_STATE_UNPROVISIONED);
-    assert(!s_kv_store_present);
+    assert(mybot_device_lifecycle_init(&s_lifecycle, &s_kv_store, "http://server", "device-1", NULL,
+                                       NULL, NULL) < 0);
+    assert(s_kv_store_present);
+    assert(s_kv_store_len == sizeof(valid_auth));
+    assert(memcmp(s_kv_store_data, &valid_auth, sizeof(valid_auth)) == 0);
 
-    install_auth_record(&valid_auth, sizeof(valid_auth));
+    s_kv_store_get_result = 0;
     lifecycle_init(&s_lifecycle, &s_kv_store, "http://server", "device-1", NULL, NULL, NULL);
+    assert(lifecycle_state(&s_lifecycle) == MYBOT_DEVICE_STATE_RUNTIME);
+    assert(strcmp(s_lifecycle.device_token, valid_auth.device_token) == 0);
     s_kv_store_erase_fails = true;
     mybot_device_lifecycle_request_pair(&s_lifecycle);
     lifecycle_tick(&s_lifecycle);
